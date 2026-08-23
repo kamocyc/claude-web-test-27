@@ -219,12 +219,17 @@ export class Swimmer extends FloatingObject {
       // Crossing the surface downwards is the catch: the loudest moment of the
       // stroke and the one that throws spray forward.
       if (previous > 0 && _handWorld.y - surface <= 0) {
-        const bite = 0.006 + effort * 0.016
-        context.splats.addImpulse(_handWorld.x, _handWorld.z, 0.16, bite, 0.35 + effort * 0.4)
+        // The catch is the loudest moment of the stroke, and it is one of the
+        // main things making the wake. Event-driven impulses like this — rather
+        // than the continuous wake term in Buoyancy — are where the waves
+        // should come from: they are one-shot and volume-neutral, so making
+        // them emphatic cannot destabilise the level.
+        const bite = 0.014 + effort * 0.036
+        context.splats.addImpulse(_handWorld.x, _handWorld.z, 0.2, bite, 0.3 + effort * 0.3)
         if (context.splash && effort > 0.15) {
           _emitDir.set(0, 1, 0).addScaledVector(_forward, 0.35).normalize()
           _handPrevious.set(_handWorld.x, surface, _handWorld.z)
-          context.splash.emit(_handPrevious, _emitDir, Math.round(6 + effort * 16), 1.2 + effort * 1.9, 0.9)
+          context.splash.emit(_handPrevious, _emitDir, Math.round(5 + effort * 13), 1.05 + effort * 1.35, 0.8)
         }
       }
     }
@@ -239,11 +244,11 @@ export class Swimmer extends FloatingObject {
       for (const foot of [feetLeft, feetRight]) {
         const surface = WATER_LEVEL + context.water.heightAt(foot.x, foot.z)
         if (foot.y > surface - 0.22) {
-          context.splats.addImpulse(foot.x, foot.z, 0.13, 0.004 * effort, 0.3 * effort)
+          context.splats.addImpulse(foot.x, foot.z, 0.15, 0.012 * effort, 0.28 * effort)
           if (context.splash && Math.random() < 0.5 + effort * 0.4) {
             _emitDir.set(0, 1, 0).addScaledVector(_forward, -0.5).normalize()
             _handPrevious.set(foot.x, surface, foot.z)
-            context.splash.emit(_handPrevious, _emitDir, 3 + Math.round(effort * 5), 1.1 + effort * 1.4, 1)
+            context.splash.emit(_handPrevious, _emitDir, 2 + Math.round(effort * 5), 1 + effort * 1.1, 0.95)
           }
         }
       }

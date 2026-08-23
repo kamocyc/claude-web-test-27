@@ -125,7 +125,7 @@ export class WaveField {
     this.cellSize = POOL.width / this.resolutionX
 
     this.speedScale = options.speedScale ?? 0.6
-    this.damping = options.damping ?? 0.9
+    this.damping = options.damping ?? 0.3
     this.levelDecay = options.levelDecay ?? 0.05
 
     // The state must be full float. Half float carries about eleven bits of

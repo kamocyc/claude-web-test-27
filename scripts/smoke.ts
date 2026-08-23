@@ -209,6 +209,15 @@ async function main(): Promise<number> {
         last.gpu.peak > 1e-5 && last.gpu.peak < last.wavePeak * 12 + 0.02,
         `gpu ${last.gpu.peak.toExponential(2)} vs cpu ${last.wavePeak.toExponential(2)}`,
       ],
+      // The counterpart to every "stays bounded" check above. Measured after
+      // the spawn transient has passed, so it is the swimmers keeping the water
+      // moving rather than the objects settling in. A damping regression that
+      // irons the pool flat passes every other check here.
+      [
+        'swimmers keep the water moving',
+        last.waveEnergy > 0.5 && last.wavePeak > 3e-3,
+        `energy ${last.waveEnergy.toFixed(3)}, peak ${last.wavePeak.toExponential(2)}`,
+      ],
       [
         'clicking splashes',
         afterClick > beforeClick * 1.05 || afterClick > 0.01,

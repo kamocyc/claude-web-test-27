@@ -133,10 +133,20 @@ export function applyBuoyancy(
       // the crater a ball makes as it lands — so the displacement carries the
       // sign of that relative motion.
       //
-      // Getting this backwards inverts the whole coupling into positive
-      // feedback: a rising surface would emit a splat that raises it further,
-      // and the pool inflates until it leaves the screen.
-      const heave = _relVel.y * 0.012 * sphere.radius * wakeStrength
+      // Getting this backwards inverts the coupling into positive feedback: a
+      // rising surface emits a splat that raises it further, and the pool
+      // inflates until it leaves the screen.
+      //
+      // The gain has to stay small, and that is the subtle part. Because the
+      // term is driven by motion *relative to the surface*, it is a relaxation
+      // that pins the water to the body — it damps as readily as it radiates.
+      // At the obvious "displaced volume per unit time" magnitude it cancels
+      // roughly a third of the surface's own motion every step, and a swimmer
+      // drags seven of these patches around, erasing the craters their own
+      // hands make. Wave *generation* is the job of the event-driven impulses
+      // below and in Swimmer; this one only ever needs to bleed off the
+      // residual, so it runs about an eighth of that scale.
+      const heave = _relVel.y * 0.0015 * sphere.radius * wakeStrength
       const speed = Math.hypot(_relVel.x, _relVel.z)
       const foam = Math.min(1, Math.max(0, (Math.abs(_relVel.y) - 0.7) * 0.35 + speed * 0.05))
       if (Math.abs(heave) > 1e-5 || foam > 0.01) {
@@ -151,7 +161,7 @@ export function applyBuoyancy(
         const lead = sphere.radius * 1.15
         const nx = _relVel.x / speed
         const nz = _relVel.z / speed
-        const bow = speed * 0.0035 * sphere.radius * wakeStrength
+        const bow = speed * 0.014 * sphere.radius * wakeStrength
         const sigma = sphere.radius * 1.2
         splats.add(centre.x + nx * lead, centre.z + nz * lead, sigma, bow, foam * 0.5)
         splats.add(centre.x - nx * lead, centre.z - nz * lead, sigma, -bow, 0)

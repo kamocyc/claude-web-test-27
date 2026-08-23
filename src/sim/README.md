@@ -107,6 +107,31 @@ Two things matter about how they are applied:
   you looked at and the field bodies felt stopped agreeing. Instancing is also
   cheaper: a splat only rasterises the texels it can actually affect.
 
+### The wake term damps as readily as it radiates
+
+The buoyancy wake is driven by each sphere's vertical speed *relative to the
+surface*. That is the physically right form — it is radiation damping — but it
+means the term is a relaxation that pins the water to the body, and it cannot
+tell the difference between making a wave and absorbing one.
+
+At the magnitude the "displaced volume per unit time" argument suggests, it
+cancels roughly a third of the surface's own motion every step, giving a time
+constant of about 30 ms. A swimmer drags seven such patches around the pool and
+erases the craters their own hands just made; five swimmers iron the whole pool
+flat. Measured, that state was a peak amplitude of 0.26 mm after fifty seconds
+of hard swimming.
+
+So the gain is held at roughly an eighth of that scale, and it is not what makes
+the waves. **Wave generation is the job of the event-driven impulses** — hand
+entries, kicks, the bow-wave dipole, the impulse an object emits as it lands.
+Those are one-shot and volume-neutral, so they can be as emphatic as the look
+needs without putting the level at risk. The continuous term only bleeds off the
+residual.
+
+`tests/waterResponse.test.ts` is the guard. Every other suite here checks the
+field cannot blow up or drift; none of them noticed the pool going flat, because
+a dead simulation satisfies every stability bound there is.
+
 ### Splats must be volume-neutral
 
 Nothing in the scheme conserves volume on its own, and the level decay is a
@@ -129,6 +154,10 @@ net water:
 `tests/waterLevel.test.ts` pins this by running a full pool for two and a half
 minutes with the level decay switched *off*, which is the condition the GPU was
 unknowingly running under.
+
+The two suites are deliberately a pair, and both are needed. `waterLevel` fails
+if the water gains or loses volume; `waterResponse` fails if it stops moving.
+Either one alone can be satisfied by breaking the other.
 
 The wave fields take `WAVE_SUBSTEPS` steps per physics step, and the splat list
 is injected on the first substep only — passing it every time would inject the

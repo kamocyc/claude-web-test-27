@@ -140,8 +140,10 @@ export class SprayParticles {
       this.velocities[p + 2] = (direction.z + jitterZ) * magnitude
 
       this.lives[index] = 0.45 + Math.random() * 0.85
-      // Droplet diameter in metres: fat splash beads, not fine mist.
-      this.sizes[index] = 0.012 + Math.random() * 0.026
+      // Droplet diameter in metres: fat splash beads, not fine mist. At the
+      // distance the pool is usually viewed from, anything under a couple of
+      // centimetres covers about two pixels and reads as nothing at all.
+      this.sizes[index] = 0.015 + Math.random() * 0.028
     }
   }
 

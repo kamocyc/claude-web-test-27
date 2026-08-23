@@ -34,6 +34,8 @@ export abstract class FloatingObject implements PhysicsActor {
   buoyancy: BuoyancyOptions
   private readonly splashThreshold: number
   private wasAboveSurface = true
+  /** Radius of the sphere that `lowestPoint` last reported. */
+  private lowestRadius = 0.1
 
   protected constructor(options: FloatingObjectOptions, object: Object3D = new Group()) {
     this.body = new RigidBody({
@@ -82,8 +84,23 @@ export abstract class FloatingObject implements PhysicsActor {
 
     if (this.wasAboveSurface && !above) {
       const impact = -this.body.velocity.y
+      if (impact > 0.25) {
+        // The wave an object makes as it lands is an event, not something the
+        // continuous wake term should be asked to produce — that one is
+        // deliberately gentle, because it damps as readily as it radiates.
+        // addImpulse keeps this volume-neutral however hard the landing is.
+        const radius = this.lowestRadius
+        const depth = Math.min(impact * 0.02 * (radius / 0.25), 0.1)
+        context.splats.addImpulse(
+          lowest.x,
+          lowest.z,
+          radius * 1.5,
+          depth,
+          Math.min(1, impact * 0.3),
+        )
+      }
       if (impact > this.splashThreshold && context.splash) {
-        const count = Math.min(90, Math.round(impact * 14))
+        const count = Math.min(90, Math.round(impact * 15))
         _velocity.copy(_up)
         context.splash.emit(
           lowest.setY(surface),
@@ -109,6 +126,7 @@ export abstract class FloatingObject implements PhysicsActor {
       }
     }
     const centre = this.body.worldSpheres[index]!
+    this.lowestRadius = this.body.spheres[index]!.radius
     return _lowest.set(centre.x, best, centre.z)
   }
 }

@@ -107,6 +107,14 @@ towards the shallow end, that a float settles at the draft where displaced water
 matches its mass, that a knocked-over duck rights itself, and that collisions
 conserve momentum.
 
+Two suites cover the water itself and are deliberately a pair, because either
+one alone can be satisfied by breaking the other. `tests/waterLevel.test.ts`
+fails if the pool gains or loses volume over a long session.
+`tests/waterResponse.test.ts` fails if it stops moving — that someone swimming
+visibly stirs the surface, leaves a wake behind them, that a ripple crosses the
+pool rather than dying where it started, and that the water settles again once
+they stop.
+
 `npm run smoke` covers the parts that need a GPU: it drives the real page in
 headless Chromium and asserts the loop is turning, the field is finite and
 bounded, swimmers are moving, floats are at plausible waterlines, clicking

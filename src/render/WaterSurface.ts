@@ -109,7 +109,10 @@ export class WaterSurface {
         uTime: { value: 0 },
         uReflectionMix: { value: 0.85 },
         uRefractionScale: { value: 0.09 },
-        uDetailStrength: { value: 0.16 },
+        // Kept low on purpose: this is the fine wind-ripple texture, and at
+        // higher values it swamps the ripples the simulation is producing,
+        // which are the ones that carry meaning.
+        uDetailStrength: { value: 0.085 },
         uDetailScale: { value: 0.32 },
         uEdgeSoftness: { value: 0.28 },
         // Beer-Lambert coefficients per metre. Red is absorbed fastest, which

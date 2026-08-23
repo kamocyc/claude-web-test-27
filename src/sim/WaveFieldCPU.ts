@@ -68,7 +68,7 @@ export class WaveFieldCPU {
     this.dx = options.width / this.cols
     this.dz = options.depth / this.rows
     this.speedScale = options.speedScale ?? 0.6
-    this.damping = options.damping ?? 0.9
+    this.damping = options.damping ?? 0.3
     this.levelDecay = options.levelDecay ?? 0.05
 
     const n = this.cols * this.rows
