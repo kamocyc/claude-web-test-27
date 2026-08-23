@@ -141,6 +141,31 @@ describe('applyBuoyancy', () => {
     }
   })
 
+  it('keeps a very light, very buoyant body stable instead of launching it', () => {
+    // A swim ring is ~2 kg of plastic displacing ~90 litres. Held on edge, its
+    // deepest section is fully submerged and pushed up with fifty times the
+    // body's weight. Without the added-mass correction the integrator diverges
+    // within a couple of seconds; this pins that down.
+    const spheres = []
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2
+      spheres.push({
+        local: new Vector3(Math.cos(a) * 0.55, 0, Math.sin(a) * 0.55),
+        radius: 0.14,
+      })
+    }
+    const body = new RigidBody({ mass: 2.2, spheres, angularDamping: 2.5 })
+    body.position.set(0, 0.05, 0)
+    body.quaternion.setFromAxisAngle(new Vector3(0, 0, 1), 1.4) // nearly on edge
+
+    settle(body, 20)
+
+    expect(Number.isFinite(body.position.y)).toBe(true)
+    expect(Math.abs(body.position.y)).toBeLessThan(1)
+    expect(body.velocity.length()).toBeLessThan(0.5)
+    expect(body.angularVelocity.length()).toBeLessThan(2)
+  })
+
   it('emits wave splats while bobbing, closing the object-to-water loop', () => {
     const body = new RigidBody({
       mass: 8,

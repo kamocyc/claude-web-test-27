@@ -24,6 +24,11 @@ export interface BuoyancyOptions {
   wakeStrength?: number
   /** Vertical drag multiplier; higher settles bobbing faster. */
   verticalDrag?: number
+  /**
+   * Added-mass coefficient. 0.5 is the textbook value for a sphere; 0 disables
+   * the correction entirely.
+   */
+  addedMass?: number
 }
 
 const _up = new Vector3(0, 1, 0)
@@ -57,6 +62,8 @@ export function applyBuoyancy(
   if (!body.dynamic) return
   const wakeStrength = options.wakeStrength ?? 1
   const verticalDrag = options.verticalDrag ?? 1
+  const addedMassCoefficient = options.addedMass ?? 0.5
+  let displacedTotal = 0
 
   // Gravity acts on the whole body, once.
   body.force.y -= body.mass * GRAVITY
@@ -73,6 +80,7 @@ export function applyBuoyancy(
     if (submersion <= -sphere.radius) continue
 
     const displaced = submergedSphereVolume(sphere.radius, submersion) * perSphereVolumeScale
+    displacedTotal += displaced
     const submergedFraction = displaced / Math.max((4 / 3) * Math.PI * sphere.radius ** 3, 1e-9)
 
     // Archimedes, applied at the sphere's own position so torque emerges.
@@ -89,12 +97,16 @@ export function applyBuoyancy(
     const area = Math.PI * sphere.radius * sphere.radius * submergedFraction
     const speed = _relVel.length()
     if (speed > 1e-6) {
-      // Quadratic form drag plus a linear term standing in for wave radiation.
-      // The linear term is what actually brings a float to rest: quadratic drag
-      // falls off as v^2 and leaves the last centimetre of bob ringing on.
+      // Quadratic form drag on every axis, plus a linear term on the vertical
+      // only. The linear term stands in for wave radiation, which damps heave
+      // and is what finally brings a bobbing float to rest — quadratic drag
+      // falls off as v^2 and leaves the last centimetre ringing on. Applying it
+      // horizontally too would be wrong: it scales with displaced volume, so a
+      // swimmer-sized body would face hundreds of newtons of surge drag and be
+      // unable to move under any plausible stroke.
       const quadratic = 0.5 * WATER_DENSITY * body.dragCoefficient * area * speed
-      const linear = body.linearDragRate * WATER_DENSITY * displaced
-      _force.copy(_relVel).multiplyScalar(-(quadratic + linear))
+      _force.copy(_relVel).multiplyScalar(-quadratic)
+      _force.y -= body.linearDragRate * WATER_DENSITY * displaced * _relVel.y
       _force.y *= verticalDrag
       // Never let one step's drag reverse the body outright — that is how an
       // explicit drag term explodes on light objects at small time steps.
@@ -131,6 +143,24 @@ export function applyBuoyancy(
   if (wetness > 0) {
     const damp = Math.max(0, 1 - body.angularDamping * wetness * dt)
     body.angularVelocity.multiplyScalar(damp)
+  }
+
+  // Added mass. A body accelerating through water has to shove water aside, so
+  // it behaves as if it were heavier by roughly half the mass of the fluid it
+  // displaces. For a swim ring — two kilos of plastic displacing ninety litres
+  // — that is the difference between a plausible bob and fifty g of buoyancy
+  // launching it out of the pool and diverging the integrator. Scaling the
+  // whole accumulated force leaves every equilibrium untouched (there the net
+  // force is zero) while taming the transients that break it.
+  //
+  // Torque is scaled by the same factor. Added inertia has its own
+  // distribution, but using the linear ratio is close enough at this scale and
+  // avoids carrying a second tensor around.
+  if (addedMassCoefficient > 0 && displacedTotal > 0) {
+    const addedMass = addedMassCoefficient * WATER_DENSITY * displacedTotal
+    const scale = body.mass / (body.mass + addedMass)
+    body.force.multiplyScalar(scale)
+    body.torque.multiplyScalar(scale)
   }
 }
 

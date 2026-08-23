@@ -1,3 +1,4 @@
+import type { Vector3 } from 'three'
 import type { FlowField } from '../sim/FlowField'
 import type { WaveFieldCPU } from '../sim/WaveFieldCPU'
 import type { SplatQueue } from '../sim/WaveSplat'
@@ -15,10 +16,20 @@ export interface PhysicsActor {
   postStep?(dt: number, context: PhysicsContext): void
 }
 
+/**
+ * Anything that can throw droplets. SprayParticles satisfies it structurally,
+ * which keeps the physics layer from having to know about rendering.
+ */
+export interface SplashSink {
+  emit(origin: Vector3, direction: Vector3, count: number, speed: number, spread?: number): void
+}
+
 export interface PhysicsContext {
   water: WaveFieldCPU
   flow: FlowField
   splats: SplatQueue
+  /** Present once the renderer is up; absent in headless tests. */
+  splash: SplashSink | null
   elapsed: number
 }
 
@@ -30,6 +41,8 @@ export interface PhysicsContext {
  */
 export class PhysicsWorld {
   readonly actors: PhysicsActor[] = []
+  /** Set by the app once particles exist. */
+  splash: SplashSink | null = null
   /** Contact relaxation passes per step. */
   iterations = 3
   elapsed = 0
@@ -56,6 +69,7 @@ export class PhysicsWorld {
       water: this.water,
       flow: this.flow,
       splats: this.splats,
+      splash: this.splash,
       elapsed: this.elapsed,
     }
 

@@ -16,6 +16,7 @@
     "three": "^0.185.1"
   },
   "devDependencies": {
+    "@types/node": "^26.2.0",
     "@types/stats.js": "^0.17.4",
     "@types/three": "^0.185.4",
     "lil-gui": "^0.21.0",

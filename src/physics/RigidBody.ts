@@ -24,10 +24,10 @@ export interface RigidBodyOptions {
   /** Quadratic drag coefficient while submerged. */
   dragCoefficient?: number
   /**
-   * Linear drag, per second, scaled by displaced volume. Stands in for wave
-   * radiation — the energy a bobbing body loses by making waves. Without it a
-   * float never settles: quadratic drag alone dies off as v^2 and leaves a
-   * small oscillation ringing forever.
+   * Linear vertical drag, per second, scaled by displaced volume. Stands in
+   * for wave radiation - the energy a bobbing body loses by making waves.
+   * Without it a float never settles: quadratic drag alone dies off as v^2 and
+   * leaves a small oscillation ringing forever. Vertical only; see Buoyancy.
    */
   linearDragRate?: number
   /** Angular velocity lost per second while submerged. */
