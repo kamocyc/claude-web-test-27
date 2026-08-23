@@ -68,11 +68,19 @@ vec3 poolCaustics() {
   vec3 refracted = refract(-normalize(uCausticsSun), vec3(0.0, 1.0, 0.0), 0.7519);
   vec2 back = (refracted.xz * (below / max(-refracted.y, 1e-3))) / uCausticsDomain;
   vec2 uv = vPoolWorldPos.xz / uCausticsDomain + 0.5 - back;
-  if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec3(0.0);
 
-  float caustic = texture2D(uCaustics, uv).r;
+  // Deep floor near the far wall is lit by surface that lies outside the
+  // simulated domain, so the lookup runs off the edge of the texture. Fade it
+  // out rather than cutting: a hard bounds test draws a visible seam straight
+  // across the pool, right where the back-projection first leaves range.
+  vec2 edge = smoothstep(vec2(0.0), vec2(0.07), uv) *
+              (vec2(1.0) - smoothstep(vec2(0.93), vec2(1.0), uv));
+  float border = edge.x * edge.y;
+  if (border <= 0.0) return vec3(0.0);
+
+  float caustic = texture2D(uCaustics, clamp(uv, vec2(0.0), vec2(1.0))).r;
   // Deep water blurs and dims the pattern; shallow water keeps it sharp.
   float fade = exp(-below * 0.32);
-  return uCausticsTint * caustic * uCausticsIntensity * fade;
+  return uCausticsTint * caustic * uCausticsIntensity * fade * border;
 }
 `
