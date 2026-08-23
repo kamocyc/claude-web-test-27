@@ -220,7 +220,7 @@ export class Swimmer extends FloatingObject {
       // stroke and the one that throws spray forward.
       if (previous > 0 && _handWorld.y - surface <= 0) {
         const bite = 0.006 + effort * 0.016
-        context.splats.add(_handWorld.x, _handWorld.z, 0.16, -bite, 0.35 + effort * 0.4)
+        context.splats.addImpulse(_handWorld.x, _handWorld.z, 0.16, bite, 0.35 + effort * 0.4)
         if (context.splash && effort > 0.15) {
           _emitDir.set(0, 1, 0).addScaledVector(_forward, 0.35).normalize()
           _handPrevious.set(_handWorld.x, surface, _handWorld.z)
@@ -239,7 +239,7 @@ export class Swimmer extends FloatingObject {
       for (const foot of [feetLeft, feetRight]) {
         const surface = WATER_LEVEL + context.water.heightAt(foot.x, foot.z)
         if (foot.y > surface - 0.22) {
-          context.splats.add(foot.x, foot.z, 0.13, -0.004 * effort, 0.3 * effort)
+          context.splats.addImpulse(foot.x, foot.z, 0.13, 0.004 * effort, 0.3 * effort)
           if (context.splash && Math.random() < 0.5 + effort * 0.4) {
             _emitDir.set(0, 1, 0).addScaledVector(_forward, -0.5).normalize()
             _handPrevious.set(foot.x, surface, foot.z)

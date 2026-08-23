@@ -1,23 +1,19 @@
-import { SPLAT_GLSL, WAVE_SPEED_GLSL } from './common'
+import { WAVE_SPEED_GLSL } from './common'
 
 /**
- * Adds this step's gaussian splats to both stored time levels.
+ * Straight copy between the two state targets.
  *
- * A separate pass rather than a term folded into the step: the step's stencil
- * reads its four neighbours, and those neighbours have to already carry the
- * splat or the disturbance would propagate from a surface the solver never
- * actually saw. Displacing both levels — rather than just the current one —
- * starts the disturbance at rest; see WaveFieldCPU.splat for why that matters.
+ * The step's stencil reads four neighbours, so those neighbours have to already
+ * carry this step's splats — otherwise the disturbance propagates out of a
+ * surface the solver never actually saw. So the splats are stamped into a copy
+ * first (by SplatRenderer, additively) and the step then reads that copy.
  */
-export const WAVE_SPLAT_FRAG = /* glsl */ `
+export const COPY_FRAG = /* glsl */ `
 varying vec2 vUv;
 uniform sampler2D uState;
-${SPLAT_GLSL}
 
 void main() {
-  vec4 state = texture2D(uState, vUv);
-  float bump = splatHeight(worldFromUv(vUv));
-  gl_FragColor = vec4(state.r + bump, state.g + bump, 0.0, 1.0);
+  gl_FragColor = texture2D(uState, vUv);
 }
 `
 

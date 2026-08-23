@@ -1,5 +1,6 @@
 import {
   ClampToEdgeWrapping,
+  Color,
   DataTexture,
   FloatType,
   HalfFloatType,
@@ -8,18 +9,29 @@ import {
   RGFormat,
   RGBAFormat,
   Vector2,
-  Vector4,
   WebGLRenderTarget,
+  type TextureDataType,
   type WebGLRenderer,
 } from 'three'
 import { POOL, PHYSICS_DT, clamp } from '../core/config'
 import { FullScreenPass } from '../render/FullScreenPass'
 import type { FlowField, Vec2 } from './FlowField'
 import { FOAM_STEP_FRAG } from './shaders/foamStep'
-import { WAVE_NORMAL_FRAG, WAVE_SPLAT_FRAG, WAVE_STEP_FRAG } from './shaders/waveStep'
+import { COPY_FRAG, WAVE_NORMAL_FRAG, WAVE_STEP_FRAG } from './shaders/waveStep'
+import { SplatRenderer } from './SplatRenderer'
 import type { SplatQueue } from './WaveSplat'
 
-const MAX_SPLATS = 32
+const _clearColor = new Color()
+
+/** IEEE half-float bits to a number, for reading back a half-precision field. */
+function decodeHalf(bits: number): number {
+  const sign = bits & 0x8000 ? -1 : 1
+  const exponent = (bits & 0x7c00) >> 10
+  const fraction = bits & 0x03ff
+  if (exponent === 0) return sign * 2 ** -14 * (fraction / 1024)
+  if (exponent === 0x1f) return fraction ? Number.NaN : sign * Number.POSITIVE_INFINITY
+  return sign * 2 ** (exponent - 15) * (1 + fraction / 1024)
+}
 
 export interface WaveFieldOptions {
   /** Texels along X. Texels along Z follow from the pool's aspect ratio. */
@@ -29,9 +41,23 @@ export interface WaveFieldOptions {
   levelDecay?: number
 }
 
-function createTarget(width: number, height: number, filter: typeof LinearFilter | typeof NearestFilter) {
-  const target = new WebGLRenderTarget(width, height, {
-    type: HalfFloatType,
+export interface FieldStats {
+  /** Largest absolute surface height in the field, metres. */
+  peak: number
+  /** Mean surface height — the quantity a volume leak would send climbing. */
+  mean: number
+  /** Count of non-finite texels. Anything above zero means it has diverged. */
+  nonFinite: number
+}
+
+function createTarget(
+  width: number,
+  height: number,
+  type: TextureDataType,
+  filter: typeof LinearFilter | typeof NearestFilter,
+) {
+  return new WebGLRenderTarget(width, height, {
+    type,
     format: RGBAFormat,
     minFilter: filter,
     magFilter: filter,
@@ -41,19 +67,20 @@ function createTarget(width: number, height: number, filter: typeof LinearFilter
     stencilBuffer: false,
     generateMipmaps: false,
   })
-  return target
 }
 
 /**
  * The high-resolution water surface, simulated entirely on the GPU.
  *
- * Two RGBA16F targets ping-pong; R holds the current height and G the previous
- * one, which is all the leapfrog scheme needs. Each step is a splat pass
- * followed by a step pass, then a normal pass derives shading data. A foam
- * field rides alongside, advected by the same current that pushes the floats.
+ * Two float render targets ping-pong; R holds the current height and G the
+ * previous one, which is all the leapfrog scheme needs. Each step copies the
+ * state, stamps the splats into the copy, advances it, and then a normal pass
+ * derives shading data. A foam field rides alongside, advected by the same
+ * current that pushes the floats.
  *
  * This field is for looks only. Buoyancy reads WaveFieldCPU instead — see the
- * note there for why nothing is ever read back from these targets.
+ * note there for why nothing is ever read back from these targets during
+ * normal operation.
  */
 export class WaveField {
   readonly width = POOL.width
@@ -61,6 +88,8 @@ export class WaveField {
   readonly resolutionX: number
   readonly resolutionY: number
   readonly cellSize: number
+  /** True when the state targets got full float precision. See below. */
+  readonly highPrecision: boolean
 
   speedScale: number
   damping: number
@@ -76,13 +105,11 @@ export class WaveField {
   private foamA: WebGLRenderTarget
   private foamB: WebGLRenderTarget
 
-  private readonly splatPass: FullScreenPass
+  private readonly copyPass: FullScreenPass
   private readonly stepPass: FullScreenPass
   private readonly normalPass: FullScreenPass
   private readonly foamPass: FullScreenPass
-
-  private readonly splatData: Vector4[] = []
-  private readonly splatFoamData: Vector4[] = []
+  private readonly splatRenderer = new SplatRenderer()
 
   /** Coarse RG texture of the current, shared by foam advection and the water shader. */
   readonly flowTexture: DataTexture
@@ -91,7 +118,7 @@ export class WaveField {
   private readonly flowData: Float32Array
   private flowDirty = true
 
-  constructor(options: WaveFieldOptions = {}) {
+  constructor(renderer: WebGLRenderer, options: WaveFieldOptions = {}) {
     const resolution = options.resolution ?? 512
     this.resolutionX = resolution
     this.resolutionY = Math.round((resolution * POOL.depth) / POOL.width)
@@ -101,16 +128,37 @@ export class WaveField {
     this.damping = options.damping ?? 0.9
     this.levelDecay = options.levelDecay ?? 0.05
 
-    this.stateA = createTarget(this.resolutionX, this.resolutionY, LinearFilter)
-    this.stateB = createTarget(this.resolutionX, this.resolutionY, LinearFilter)
-    this.normalTarget = createTarget(this.resolutionX, this.resolutionY, LinearFilter)
-    this.foamA = createTarget(this.resolutionX >> 1, this.resolutionY >> 1, LinearFilter)
-    this.foamB = createTarget(this.resolutionX >> 1, this.resolutionY >> 1, LinearFilter)
+    // The state must be full float. Half float carries about eleven bits of
+    // mantissa, and the level decay is a multiply by 1 - 2.1e-4 per step —
+    // always less than half an ULP, so it rounds straight back to the value it
+    // started from. The decay silently stops happening, any net volume the
+    // splats inject accumulates forever, and the pool inflates until it leaves
+    // the screen. Everything downstream (normals, foam) is fine at half.
+    this.highPrecision = renderer.extensions.has('EXT_color_buffer_float')
+    const stateType: TextureDataType = this.highPrecision ? FloatType : HalfFloatType
 
-    for (let i = 0; i < MAX_SPLATS; i++) {
-      this.splatData.push(new Vector4(0, 0, 1, 0))
-      this.splatFoamData.push(new Vector4(0, 0, 1, 0))
-    }
+    // Nearest filtering on the state: every read is at an exact texel centre,
+    // and it keeps float targets off the OES_texture_float_linear extension.
+    this.stateA = createTarget(this.resolutionX, this.resolutionY, stateType, NearestFilter)
+    this.stateB = createTarget(this.resolutionX, this.resolutionY, stateType, NearestFilter)
+    this.normalTarget = createTarget(
+      this.resolutionX,
+      this.resolutionY,
+      HalfFloatType,
+      LinearFilter,
+    )
+    this.foamA = createTarget(
+      this.resolutionX >> 1,
+      this.resolutionY >> 1,
+      HalfFloatType,
+      LinearFilter,
+    )
+    this.foamB = createTarget(
+      this.resolutionX >> 1,
+      this.resolutionY >> 1,
+      HalfFloatType,
+      LinearFilter,
+    )
 
     this.flowData = new Float32Array(this.flowWidth * this.flowHeight * 2)
     this.flowTexture = new DataTexture(
@@ -127,15 +175,8 @@ export class WaveField {
     this.flowTexture.needsUpdate = true
 
     const texel = new Vector2(1 / this.resolutionX, 1 / this.resolutionY)
-    const domain = new Vector2(POOL.width, POOL.depth)
 
-    this.splatPass = new FullScreenPass(WAVE_SPLAT_FRAG, {
-      uState: { value: null },
-      uSplatCount: { value: 0 },
-      uSplats: { value: this.splatData },
-      uSplatFoam: { value: this.splatFoamData },
-      uDomain: { value: domain },
-    })
+    this.copyPass = new FullScreenPass(COPY_FRAG, { uState: { value: null } })
 
     this.stepPass = new FullScreenPass(WAVE_STEP_FRAG, {
       uState: { value: null },
@@ -163,10 +204,7 @@ export class WaveField {
       uDecay: { value: this.foamDecay },
       uChurnThreshold: { value: this.foamChurnThreshold },
       uChurnGain: { value: this.foamChurnGain },
-      uSplatCount: { value: 0 },
-      uSplats: { value: this.splatData },
-      uSplatFoam: { value: this.splatFoamData },
-      uDomain: { value: domain },
+      uDomain: { value: new Vector2(POOL.width, POOL.depth) },
     })
   }
 
@@ -201,19 +239,6 @@ export class WaveField {
     this.flowDirty = false
   }
 
-  private uploadSplats(queue: SplatQueue): number {
-    const count = Math.min(queue.length, MAX_SPLATS)
-    for (let i = 0; i < count; i++) {
-      const splat = queue.at(i)
-      // Sigma is floored at a texel so a splat can never fall between texels
-      // and vanish on the GPU while still registering on the coarse CPU field.
-      const sigma = Math.max(splat.radius, this.cellSize * 1.5)
-      this.splatData[i]!.set(splat.x, splat.z, sigma, splat.strength)
-      this.splatFoamData[i]!.set(splat.x, splat.z, sigma * 1.6, splat.foam)
-    }
-    return count
-  }
-
   /**
    * Advance the surface by one step and refresh the derived textures.
    *
@@ -224,16 +249,16 @@ export class WaveField {
    */
   step(renderer: WebGLRenderer, queue: SplatQueue | null, flow: FlowField, dt: number): void {
     this.updateFlowTexture(flow)
-    const count = queue ? this.uploadSplats(queue) : 0
 
-    // Splat pass: stateA -> stateB, so the step below sees neighbours that
-    // already carry the disturbance. With no splats this is a plain copy, which
-    // keeps the ping-pong parity the same on every substep.
-    this.splatPass.uniforms.uState!.value = this.stateA.texture
-    this.splatPass.uniforms.uSplatCount!.value = count
-    this.splatPass.render(renderer, this.stateB)
+    // Copy stateA into stateB, stamp this step's splats on top, then advance
+    // stateB back into stateA. The copy is what lets the step's stencil see
+    // neighbours that already carry the disturbance.
+    this.copyPass.uniforms.uState!.value = this.stateA.texture
+    this.copyPass.render(renderer, this.stateB)
+    if (queue) {
+      this.splatRenderer.render(renderer, this.stateB, queue, 'height', this.cellSize * 1.5)
+    }
 
-    // Step pass: stateB -> stateA, leaving the current state back in A.
     const step = this.stepPass.uniforms
     step.uState!.value = this.stateB.texture
     step.uRateKeep!.value = clamp(1 - this.damping * dt, 0, 1)
@@ -249,8 +274,12 @@ export class WaveField {
     foam.uDecay!.value = this.foamDecay
     foam.uChurnThreshold!.value = this.foamChurnThreshold
     foam.uChurnGain!.value = this.foamChurnGain
-    foam.uSplatCount!.value = count
     this.foamPass.render(renderer, this.foamB)
+    if (queue) {
+      // Foam is a rate, so it scales with the step length; the height channel
+      // is a displacement in metres and goes in as-is.
+      this.splatRenderer.render(renderer, this.foamB, queue, 'foam', this.cellSize * 2, dt * 6)
+    }
     const swapFoam = this.foamA
     this.foamA = this.foamB
     this.foamB = swapFoam
@@ -262,25 +291,61 @@ export class WaveField {
     this.normalPass.render(renderer, this.normalTarget)
   }
 
+  /**
+   * Read the height field back and summarise it.
+   *
+   * Diagnostic only — it stalls the pipeline, so it is for the smoke test and
+   * the debug panel, never the frame loop.
+   */
+  sampleStats(renderer: WebGLRenderer): FieldStats {
+    const width = this.resolutionX
+    const height = this.resolutionY
+    // The read buffer has to match the target's storage, which is not always
+    // float — see highPrecision.
+    const buffer = this.highPrecision
+      ? new Float32Array(width * height * 4)
+      : new Uint16Array(width * height * 4)
+    renderer.readRenderTargetPixels(this.stateA, 0, 0, width, height, buffer)
+
+    let peak = 0
+    let sum = 0
+    let nonFinite = 0
+    for (let i = 0; i < width * height; i++) {
+      const raw = buffer[i * 4]!
+      const value = this.highPrecision ? raw : decodeHalf(raw)
+      if (!Number.isFinite(value)) {
+        nonFinite++
+        continue
+      }
+      peak = Math.max(peak, Math.abs(value))
+      sum += value
+    }
+    return { peak, mean: sum / (width * height), nonFinite }
+  }
+
   /** Flatten the surface and clear the whitewater. */
   reset(renderer: WebGLRenderer): void {
-    const previous = renderer.getRenderTarget()
+    const previousTarget = renderer.getRenderTarget()
+    const previousClear = renderer.getClearColor(_clearColor).getHex()
+    const previousAlpha = renderer.getClearAlpha()
+    renderer.setClearColor(0x000000, 0)
     for (const target of [this.stateA, this.stateB, this.normalTarget, this.foamA, this.foamB]) {
       renderer.setRenderTarget(target)
-      renderer.setClearColor(0x000000, 0)
       renderer.clear(true, false, false)
     }
-    renderer.setRenderTarget(previous)
+    renderer.setRenderTarget(previousTarget)
+    renderer.setClearColor(previousClear, previousAlpha)
   }
 
   dispose(): void {
     for (const target of [this.stateA, this.stateB, this.normalTarget, this.foamA, this.foamB]) {
       target.dispose()
     }
-    this.splatPass.dispose()
+    this.copyPass.dispose()
     this.stepPass.dispose()
     this.normalPass.dispose()
     this.foamPass.dispose()
+    this.splatRenderer.dispose()
     this.flowTexture.dispose()
   }
 }

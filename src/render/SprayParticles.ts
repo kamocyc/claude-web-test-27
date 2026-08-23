@@ -180,9 +180,9 @@ export class SprayParticles {
 
       if (y <= surface && this.velocities[p + 1]! < 0) {
         if (insidePool) {
-          // The droplet is reabsorbed, and it pushes the surface as it goes.
+          // The droplet is reabsorbed, and it dents the surface as it goes.
           const impact = Math.min(-this.velocities[p + 1]! * 0.0016, 0.02)
-          splats.add(x, z, 0.11, -impact, 0.28)
+          splats.addImpulse(x, z, 0.11, impact, 0.28)
         }
         this.lives[i] = 0
         this.positions[p + 1] = -1000

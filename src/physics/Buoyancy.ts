@@ -128,12 +128,33 @@ export function applyBuoyancy(
     // Wave making: only spheres straddling the surface disturb it, and only in
     // proportion to how fast they are pushing water out of the way.
     if (wakeStrength > 0 && Math.abs(submersion) < sphere.radius * 1.5) {
-      const plunge = waterVy - _pointVel.y
-      const horizontal = Math.hypot(_relVel.x, _relVel.z)
-      const strength = (plunge * 0.016 + horizontal * 0.004) * sphere.radius * wakeStrength
-      const foam = Math.min(1, Math.max(0, (Math.abs(plunge) - 0.7) * 0.35 + horizontal * 0.05))
-      if (Math.abs(strength) > 1e-5 || foam > 0.01) {
-        splats.add(centre.x, centre.z, sphere.radius * 1.4, strength, foam)
+      // _relVel.y is the sphere's vertical speed *relative to the surface*.
+      // Moving down into the water pushes the surface down at the contact —
+      // the crater a ball makes as it lands — so the displacement carries the
+      // sign of that relative motion.
+      //
+      // Getting this backwards inverts the whole coupling into positive
+      // feedback: a rising surface would emit a splat that raises it further,
+      // and the pool inflates until it leaves the screen.
+      const heave = _relVel.y * 0.012 * sphere.radius * wakeStrength
+      const speed = Math.hypot(_relVel.x, _relVel.z)
+      const foam = Math.min(1, Math.max(0, (Math.abs(_relVel.y) - 0.7) * 0.35 + speed * 0.05))
+      if (Math.abs(heave) > 1e-5 || foam > 0.01) {
+        splats.add(centre.x, centre.z, sphere.radius * 1.4, heave, foam)
+      }
+
+      // Bow wave. Water piles up ahead of a moving body and drops away behind
+      // it, so this goes in as a dipole: equal and opposite, adding no net
+      // volume. A single unsigned bump would be a steady volume source, and
+      // over a few minutes it quietly raises the whole pool.
+      if (speed > 0.15) {
+        const lead = sphere.radius * 1.15
+        const nx = _relVel.x / speed
+        const nz = _relVel.z / speed
+        const bow = speed * 0.0035 * sphere.radius * wakeStrength
+        const sigma = sphere.radius * 1.2
+        splats.add(centre.x + nx * lead, centre.z + nz * lead, sigma, bow, foam * 0.5)
+        splats.add(centre.x - nx * lead, centre.z - nz * lead, sigma, -bow, 0)
       }
     }
   }

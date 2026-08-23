@@ -6,8 +6,27 @@ sources, with the same wave speed.
 | | `WaveField` (GPU) | `WaveFieldCPU` |
 |---|---|---|
 | Resolution | 512 x 320 (quality preset) | 128 x 80 |
-| Storage | two RGBA16F targets, ping-ponged; R = h(t), G = h(t-1) | three `Float32Array`s |
+| Storage | two RGBA32F targets, ping-ponged; R = h(t), G = h(t-1) | three `Float32Array`s |
 | Read by | the water surface shader, foam, caustics | buoyancy, spray, click tests |
+
+### The state targets must be full float
+
+This is not a quality setting. Half float carries about eleven bits of mantissa,
+so its resolution is roughly one part in a thousand — and the level decay is a
+multiply by `1 - levelDecay * dt` = `1 - 2.1e-4` per step. That is always less
+than half an ULP, so it rounds straight back to the value it started from, at
+every height the pool ever reaches.
+
+The effect is that the decay silently does not happen. Any net volume the splats
+inject then accumulates with nothing to bleed it off, and over a few minutes the
+whole surface lifts and sails away. Meanwhile the CPU field, in float32, bleeds
+it correctly and stays flat — so the two disagree, and the one you can see is the
+broken one.
+
+`WaveField.highPrecision` records whether `EXT_color_buffer_float` was available.
+The smoke test asserts it. Everything downstream — normals, foam — is fine at
+half precision, because their per-step changes are far larger relative to their
+magnitudes.
 
 ## Why two fields instead of one
 
@@ -76,10 +95,40 @@ Two things matter about how they are applied:
   solver reading an implied vertical velocity of `strength / dt` — tens of metres
   per second for a centimetre-scale splash — and the field balloons far past the
   amplitude that was asked for.
-- **On the GPU they are a separate pass.** The step's stencil reads four
+- **On the GPU they are stamped into a copy.** The step's stencil reads four
   neighbours, and those neighbours have to already carry the splat, or the
-  disturbance propagates from a surface the solver never saw. The splat pass
-  runs `stateA -> stateB` and the step runs `stateB -> stateA`.
+  disturbance propagates from a surface the solver never saw. So `stateA` is
+  copied to `stateB`, `SplatRenderer` stamps the splats into it additively, and
+  the step runs `stateB -> stateA`.
+- **There is no cap on how many.** `SplatRenderer` draws one instanced quad per
+  splat, sized to its own three-sigma footprint. The earlier version looped over
+  an array of shader uniforms, which capped at 32 while a busy pool produces
+  well over a hundred a step — everything past the cap was dropped, so the field
+  you looked at and the field bodies felt stopped agreeing. Instancing is also
+  cheaper: a splat only rasterises the texels it can actually affect.
+
+### Splats must be volume-neutral
+
+Nothing in the scheme conserves volume on its own, and the level decay is a
+safety net rather than the mechanism. Every source is therefore built to add no
+net water:
+
+- The buoyancy wake carries the sign of the body's vertical motion *relative to
+  the surface*. Moving down into the water pushes the surface down at the
+  contact — the crater a ball makes as it lands. Getting this backwards inverts
+  the coupling into positive feedback: a rising surface emits a splat that
+  raises it further.
+- The bow wave goes in as a dipole, positive ahead of the body and negative
+  behind. A single unsigned bump would make every moving object a steady source.
+- Splashes — a landing droplet, a hand entering, a click — use
+  `SplatQueue.addImpulse`, which emits a crater *and* a rim whose volumes cancel
+  exactly (a gaussian's volume is `amplitude * 2*pi*sigma^2`, so a rim at twice
+  the radius takes a quarter of the amplitude). A bare one-sided dent is a
+  steady sink. It also happens to be what a splash looks like.
+
+`tests/waterLevel.test.ts` pins this by running a full pool for two and a half
+minutes with the level decay switched *off*, which is the condition the GPU was
+unknowingly running under.
 
 The wave fields take `WAVE_SUBSTEPS` steps per physics step, and the splat list
 is injected on the first substep only — passing it every time would inject the

@@ -1,5 +1,3 @@
-import { SPLAT_GLSL } from './common'
-
 /**
  * Whitewater: advected by the current, decaying everywhere, deposited wherever
  * the surface is churning.
@@ -7,7 +5,8 @@ import { SPLAT_GLSL } from './common'
  * The churn term reads the two stored time levels and deposits foam in
  * proportion to how fast the surface is moving vertically, so wave crests
  * whipped up by a swimmer go white without anyone having to spawn foam
- * explicitly. Splashes add their own on top through the splat list.
+ * explicitly. Splashes add their own on top, stamped in afterwards by
+ * SplatRenderer.
  */
 export const FOAM_STEP_FRAG = /* glsl */ `
 varying vec2 vUv;
@@ -18,7 +17,7 @@ uniform float uDt;
 uniform float uDecay;
 uniform float uChurnThreshold;
 uniform float uChurnGain;
-${SPLAT_GLSL}
+uniform vec2 uDomain;
 
 void main() {
   // Semi-Lagrangian advection: look back along the current.
@@ -31,8 +30,6 @@ void main() {
   vec4 state = texture2D(uState, vUv);
   float churn = abs(state.r - state.g) / max(uDt, 1e-5);
   foam += smoothstep(uChurnThreshold, uChurnThreshold * 3.0, churn) * uChurnGain * uDt;
-
-  foam += splatFoam(worldFromUv(vUv)) * uDt * 6.0;
 
   gl_FragColor = vec4(clamp(foam, 0.0, 1.0), 0.0, 0.0, 1.0);
 }

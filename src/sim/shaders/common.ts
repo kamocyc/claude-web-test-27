@@ -85,42 +85,6 @@ float stencilWeight(float v) {
 }
 `
 
-/** Uniform block and evaluation for the gaussian splats. */
-export const SPLAT_GLSL = /* glsl */ `
-#define MAX_SPLATS 32
-uniform int uSplatCount;
-// xy = world centre, z = sigma (metres), w = displacement (metres)
-uniform vec4 uSplats[MAX_SPLATS];
-uniform vec4 uSplatFoam[MAX_SPLATS];
-uniform vec2 uDomain;
-
-vec2 worldFromUv(vec2 uv) {
-  return (uv - 0.5) * uDomain;
-}
-
-float splatHeight(vec2 world) {
-  float total = 0.0;
-  for (int i = 0; i < MAX_SPLATS; i++) {
-    if (i >= uSplatCount) break;
-    vec4 s = uSplats[i];
-    vec2 d = world - s.xy;
-    total += s.w * exp(-dot(d, d) / (2.0 * s.z * s.z));
-  }
-  return total;
-}
-
-float splatFoam(vec2 world) {
-  float total = 0.0;
-  for (int i = 0; i < MAX_SPLATS; i++) {
-    if (i >= uSplatCount) break;
-    vec4 s = uSplatFoam[i];
-    vec2 d = world - s.xy;
-    total += s.w * exp(-dot(d, d) / (2.0 * s.z * s.z));
-  }
-  return total;
-}
-`
-
 /** Vertex shader for every fullscreen simulation pass. */
 export const FULLSCREEN_VERT = /* glsl */ `
 varying vec2 vUv;

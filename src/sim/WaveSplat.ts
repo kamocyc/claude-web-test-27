@@ -42,6 +42,25 @@ export class SplatQueue {
     this.count++
   }
 
+  /**
+   * A splash: a crater with a raised rim around it.
+   *
+   * Emitted as two gaussians whose volumes cancel exactly. A gaussian's volume
+   * is amplitude * 2*pi*sigma^2, so a rim at twice the radius needs a quarter of
+   * the amplitude. That matters because a bare one-sided dent is a steady
+   * volume sink: every landing droplet and every hand entry would remove a
+   * little water, and over a long session the level walks away from rest. It
+   * also happens to be what a splash actually looks like.
+   */
+  addImpulse(x: number, z: number, radius: number, depth: number, foam = 0): void {
+    if (radius <= 0 || depth === 0) {
+      if (foam > 0) this.add(x, z, Math.max(radius, 1e-3), 0, foam)
+      return
+    }
+    this.add(x, z, radius, -depth, foam)
+    this.add(x, z, radius * 2, depth * 0.25, 0)
+  }
+
   get length(): number {
     return this.count
   }

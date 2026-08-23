@@ -56,6 +56,9 @@ interface Probe {
   swimmerSpeeds: number[]
   floatDrafts: number[]
   drawCalls: number
+  /** Read back from the GPU height field, which nothing else here can see. */
+  gpu: { peak: number; mean: number; nonFinite: number }
+  gpuHighPrecision: boolean
 }
 
 async function main(): Promise<number> {
@@ -121,6 +124,8 @@ async function main(): Promise<number> {
           swimmerSpeeds: app.swimmers.map((s: { speed: number }) => s.speed),
           floatDrafts: app.floats.map((f: { body: { position: { y: number } } }) => f.body.position.y),
           drawCalls: app.renderer.info.render.calls,
+          gpu: app.waves.sampleStats(app.renderer),
+          gpuHighPrecision: app.waves.highPrecision,
         }
       })) as Probe
 
@@ -128,8 +133,9 @@ async function main(): Promise<number> {
       await page.screenshot({ path: `${OUT_DIR}/pool-${at}s.png` })
       console.log(
         `t=${at}s  simTime=${probe.elapsed.toFixed(2)}s  steps/frame=${probe.steps}  ` +
-          `waveEnergy=${probe.waveEnergy.toFixed(2)}  peak=${probe.wavePeak.toFixed(4)}m  ` +
-          `spray=${probe.sprayCount}  draws=${probe.drawCalls}`,
+          `cpuPeak=${probe.wavePeak.toFixed(4)}m  gpuPeak=${probe.gpu.peak.toFixed(4)}m  ` +
+          `gpuMean=${probe.gpu.mean.toExponential(2)}m  spray=${probe.sprayCount}  ` +
+          `draws=${probe.drawCalls}`,
       )
     }
 
@@ -184,6 +190,25 @@ async function main(): Promise<number> {
         `drafts ${last.floatDrafts.map((y) => y.toFixed(2)).join(', ')}`,
       ],
       ['scene is drawing', last.drawCalls > 20, `${last.drawCalls} draw calls`],
+      // Half float cannot represent the level decay's per-step multiply — it is
+      // under half an ULP, so it rounds away and the field's volume is never
+      // bled off. Falling back to it means the pool will slowly inflate.
+      [
+        'GPU height field has float precision',
+        last.gpuHighPrecision,
+        'EXT_color_buffer_float missing; the state fell back to half float',
+      ],
+      ['GPU height field finite', last.gpu.nonFinite === 0, `${last.gpu.nonFinite} bad texels`],
+      [
+        'GPU height field bounded',
+        last.gpu.peak < 0.5 && Math.abs(last.gpu.mean) < 0.05,
+        `peak ${last.gpu.peak.toFixed(4)}, mean ${last.gpu.mean.toExponential(2)}`,
+      ],
+      [
+        'GPU and CPU fields agree in scale',
+        last.gpu.peak > 1e-5 && last.gpu.peak < last.wavePeak * 12 + 0.02,
+        `gpu ${last.gpu.peak.toExponential(2)} vs cpu ${last.wavePeak.toExponential(2)}`,
+      ],
       [
         'clicking splashes',
         afterClick > beforeClick * 1.05 || afterClick > 0.01,

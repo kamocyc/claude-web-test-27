@@ -114,7 +114,7 @@ export class App {
     this.scene.background = ABOVE_WATER_CLEAR
     this.environment = new Environment(this.scene, this.renderer)
 
-    this.waves = new WaveField({ resolution: quality.waveResolution })
+    this.waves = new WaveField(this.renderer, { resolution: quality.waveResolution })
     this.water = new WaveFieldCPU({
       width: POOL.width,
       depth: POOL.depth,
@@ -312,7 +312,7 @@ export class App {
     )
     if (!hit) return
 
-    this.splats.add(this.scratch.x, this.scratch.z, 0.3, -0.055, 0.8)
+    this.splats.addImpulse(this.scratch.x, this.scratch.z, 0.3, 0.055, 0.8)
     this.spray.emit(this.scratch, UP, 60, 3.2, 0.9)
   }
 

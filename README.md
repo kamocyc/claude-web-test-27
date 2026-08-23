@@ -47,7 +47,8 @@ of day, and buttons to drop more things in.
 entering the water, a droplet landing, a click on the surface — all of them emit
 the same `WaveSplat`, and both height fields consume the identical list each
 step. Add a new object and it makes correct waves without anyone writing wave
-code for it.
+code for it. Every source is built to add no net water, so the pool holds its
+level over a long session.
 
 **The loop closes.** Buoyancy emits splats in proportion to how fast a body is
 displacing water; those splats become waves; those waves push on every other
