@@ -11,6 +11,7 @@ import {
   Vector3,
 } from 'three'
 import { POOL, SLIDE, WATER_LEVEL } from '../core/config'
+import { isWet } from '../core/world'
 import { resolveOneSided } from '../physics/Collide'
 import type { PhysicsContext, WorldFeature } from '../physics/PhysicsWorld'
 import type { RigidBody } from '../physics/RigidBody'
@@ -218,6 +219,10 @@ export class WaterSlide implements WorldFeature {
   send(swimmer: Swimmer): void {
     if (this.riders.has(swimmer)) return
     this.riders.set(swimmer, { stage: 'climbing', walked: 0, age: 0 })
+    // The slide owns the pose from here until they are back in the water: the
+    // steps and the flume are both places where what the ground says and what
+    // the rider is doing disagree.
+    swimmer.poseLocked = true
     swimmer.pose = 'stand'
     swimmer.throttle = 0
     swimmer.body.dynamic = false
@@ -276,7 +281,7 @@ export class WaterSlide implements WorldFeature {
       _normal.copy(_radial).multiplyScalar(-1)
       _contact.copy(centre).addScaledVector(_normal, -radius)
       // Wet plastic: barely any friction, which is the whole point of a slide.
-      resolveOneSided(body, _contact, _normal, penetration, 0.1, 0.06)
+      resolveOneSided(body, _contact, _normal, penetration, 0.1, 0.06, i)
     }
   }
 
@@ -357,8 +362,7 @@ export class WaterSlide implements WorldFeature {
     // water either.
     if (!landed && rider.age < 4) return
 
-    const inPool =
-      Math.abs(body.position.x) < POOL.width / 2 && Math.abs(body.position.z) < POOL.depth / 2
+    const inPool = isWet(body.position.x, body.position.z)
     if (landed && inPool) {
       // The plume of a body arriving at six metres a second: a broad ring of
       // whitewater on top of the dent the entry itself makes.
@@ -374,6 +378,7 @@ export class WaterSlide implements WorldFeature {
 
     this.riders.delete(swimmer)
     this.cooldown.set(swimmer, 12)
+    swimmer.poseLocked = false
     swimmer.pose = 'swim'
   }
 

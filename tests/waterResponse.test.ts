@@ -1,6 +1,7 @@
 import { Vector3 } from 'three'
 import { describe, expect, it } from 'vitest'
-import { PHYSICS_DT, POOL, WAVE_DT, WAVE_SUBSTEPS } from '../src/core/config'
+import { PHYSICS_DT, WAVE_DT, WAVE_SUBSTEPS } from '../src/core/config'
+import { CALM_POOL, wetDepthAt } from '../src/core/world'
 import { BeachBall } from '../src/entities/PoolFloat'
 import { Swimmer } from '../src/entities/Swimmer'
 import { PhysicsWorld } from '../src/physics/PhysicsWorld'
@@ -30,9 +31,29 @@ interface Harness {
   advanceTrackingPeak(seconds: number): number
 }
 
-/** A still pool with no current, so only the bodies disturb the water. */
+/**
+ * A still pool with no current, so only the bodies disturb the water.
+ *
+ * It is the ordinary rectangular pool, not the lazy river: these tests want
+ * fourteen clear metres to swim in a straight line, and the river's water is a
+ * ring round an island. Coordinates are given relative to the middle of it, so
+ * `at(-7, 0)` is one end wall and `at(7, 0)` the other.
+ */
+const MID_Z = (CALM_POOL.minZ + CALM_POOL.maxZ) / 2
+
+function at(x: number, z: number): Vector3 {
+  return new Vector3(x, 0, MID_Z + z)
+}
+
 function harness(): Harness {
-  const water = new WaveFieldCPU({ width: POOL.width, depth: POOL.depth, cols: 128, rows: 80 })
+  const water = new WaveFieldCPU({
+    width: CALM_POOL.maxX - CALM_POOL.minX,
+    depth: CALM_POOL.maxZ - CALM_POOL.minZ,
+    centerZ: MID_Z,
+    cols: 128,
+    rows: 80,
+    depthAt: wetDepthAt,
+  })
   const flow = new FlowField()
   const splats = new SplatQueue()
   const physics = new PhysicsWorld(water, flow, splats)
@@ -65,7 +86,7 @@ function harness(): Harness {
 
 function swimmerAt(h: Harness, x: number, z: number, headingX: number, headingZ: number): Swimmer {
   const swimmer = new Swimmer(0)
-  swimmer.placeAt(x, z, -0.04)
+  swimmer.placeAt(x, MID_Z + z, -0.04)
   swimmer.faceDirection(headingX, headingZ)
   swimmer.throttle = 1
   h.physics.add(swimmer)
@@ -122,8 +143,8 @@ describe('the water responds to what moves through it', () => {
       const behind = swimmer.body.position.x - 3
       const wake = peakAlong(
         h.water,
-        new Vector3(behind - 1.5, 0, -0.8),
-        new Vector3(behind - 1.5, 0, 0.8),
+        at(behind - 1.5, -0.8),
+        at(behind - 1.5, 0.8),
       )
       console.log(
         `[wake] swimmer x=${swimmer.body.position.x.toFixed(2)} ` +
@@ -142,7 +163,7 @@ describe('the water responds to what moves through it', () => {
     () => {
       const h = harness()
       // One sharp disturbance in otherwise still water.
-      h.water.splat(-4, 0, 0.25, 0.03)
+      h.water.splat(-4, MID_Z, 0.25, 0.03)
 
       // Shallow-water speed at mid-pool is ~2.6 m/s, so 3 m takes a bit over a
       // second. Track the largest amplitude that ever reaches the probe.
@@ -150,7 +171,7 @@ describe('the water responds to what moves through it', () => {
       const steps = Math.round(3 / PHYSICS_DT)
       for (let i = 0; i < steps; i++) {
         for (let k = 0; k < WAVE_SUBSTEPS; k++) h.water.step(WAVE_DT)
-        arrived = Math.max(arrived, Math.abs(h.water.heightAt(-1, 0)))
+        arrived = Math.max(arrived, Math.abs(h.water.heightAt(-1, MID_Z)))
       }
       console.log(`[propagate] peak 3m away = ${arrived.toExponential(2)}m of a 0.03m splat`)
 
@@ -165,7 +186,7 @@ describe('the water responds to what moves through it', () => {
     () => {
       const h = harness()
       const ball = new BeachBall()
-      ball.placeAt(0, 0, 1.2) // dropped from 1.2 m up
+      ball.placeAt(0, MID_Z, 1.2) // dropped from 1.2 m up
       h.physics.add(ball)
 
       h.advance(2.5)

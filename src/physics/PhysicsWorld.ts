@@ -125,6 +125,9 @@ export class PhysicsWorld {
       actor.applyControl?.(dt, context)
       applyBuoyancy(actor.body, this.water, this.flow, this.splats, dt, actor.buoyancy ?? {})
       for (const feature of this.features) feature.applyForces?.(actor.body, dt, context)
+      // Last, so that everything pushing on this body is scaled by the same
+      // added mass. See RigidBody.addedMassScale.
+      actor.body.applyAddedMass()
     }
 
     for (const actor of this.actors) actor.body.integrate(dt)

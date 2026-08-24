@@ -1,6 +1,7 @@
 import { Vector3 } from 'three'
-import { POOL, POOL_HALF_D, POOL_HALF_W, WATER_LEVEL, floorYAt } from '../core/config'
+import { WATER_LEVEL } from '../core/config'
 import { stadiumDistance, type Stadium, type Vec2 } from '../core/shapes'
+import { BASINS, DECK_TOP, basinDepthAt, rampHeightAt, type Basin, type Ramp } from '../core/world'
 import type { RigidBody } from './RigidBody'
 
 /**
@@ -53,6 +54,8 @@ function resolveContact(
   penetration: number,
   restitution: number,
   friction: number,
+  sphereA = -1,
+  sphereB = -1,
 ): void {
   const invMassSum = a.invMass + (b ? b.invMass : 0)
   if (invMassSum <= 0) return
@@ -82,7 +85,14 @@ function resolveContact(
   a.applyImpulse(_impulse, contact)
   if (b) b.applyImpulse(_impulse.negate(), contact)
 
+  // Tell whichever spheres were involved how hard they were pressed. This is
+  // what an inflatable deforms in response to.
+  const load = Math.abs(j)
+  a.recordLoad(sphereA, load, normal)
+  if (b) b.recordLoad(sphereB, load, normal)
+
   // Coulomb-ish tangential impulse.
+  friction *= a.frictionScale * (b ? b.frictionScale : 1)
   if (friction > 0) {
     _tangent.copy(_rel).addScaledVector(normal, -normalVel)
     const tangentSpeed = _tangent.length()
@@ -123,8 +133,9 @@ export function resolveOneSided(
   penetration: number,
   restitution: number,
   friction: number,
+  sphere = -1,
 ): void {
-  resolveContact(body, null, contact, normal, penetration, restitution, friction)
+  resolveContact(body, null, contact, normal, penetration, restitution, friction, sphere)
 }
 
 /** Resolve every overlapping sphere pair between two bodies. */
@@ -157,64 +168,194 @@ export function collidePair(a: RigidBody, b: RigidBody): void {
         .addScaledVector(_normal, rb)
         .add(_scratch.copy(ca).addScaledVector(_normal, -ra))
         .multiplyScalar(0.5)
-      resolveContact(a, b, _contact, _normal, penetration, restitution, 0.25)
+      resolveContact(a, b, _contact, _normal, penetration, restitution, 0.25, i, j)
     }
   }
 }
 
 /**
- * Keep a body inside the pool shell: four walls, the sloping floor, and the
- * deck it lands on if it leaves.
+ * Keep a body inside the pool shells: each basin's four walls and sloping
+ * floor, and the deck it lands on if it leaves.
  *
  * The walls are only as tall as they really are. Treating them as infinite
  * half-spaces is tempting and wrong: the water slide's flume passes over the
  * deck, so a rider on it would be dragged sideways into the pool by a wall
  * that, in the world being drawn, stops at knee height. Above the coping the
  * basin simply is not there, and outside it the deck catches whatever comes
- * down.
+ * down — including anyone walking from one pool to the other.
  */
 export function collideWithPool(body: RigidBody): void {
   if (!body.dynamic) return
-
-  const deckY = WATER_LEVEL + POOL.copingHeight
 
   for (let i = 0; i < body.spheres.length; i++) {
     const centre = body.worldSpheres[i]!
     const radius = body.spheres[i]!.radius
 
-    // "In the basin" is the footprint grown by the sphere's own radius, so a
+    // "In this basin" is its footprint grown by the sphere's own radius, so a
     // body breaching a wall is still held by it while a body clear of the edge
-    // is left to the deck. The two regions do not overlap.
-    const inBasin =
-      Math.abs(centre.x) < POOL_HALF_W + radius && Math.abs(centre.z) < POOL_HALF_D + radius
+    // is left to the deck. The regions do not overlap: the walkway between the
+    // pools is metres wide and the spheres are centimetres.
+    const basin = grownBasinAt(centre.x, centre.z, radius)
 
-    if (inBasin) {
-      if (centre.y < deckY) {
-        checkPlane(body, centre, radius, 1, 0, 0, -POOL_HALF_W)
-        checkPlane(body, centre, radius, -1, 0, 0, -POOL_HALF_W)
-        checkPlane(body, centre, radius, 0, 0, 1, -POOL_HALF_D)
-        checkPlane(body, centre, radius, 0, 0, -1, -POOL_HALF_D)
+    if (basin !== null) {
+      if (centre.y < DECK_TOP) {
+        checkPlane(body, centre, radius, 1, 0, 0, basin.minX, i)
+        checkPlane(body, centre, radius, -1, 0, 0, -basin.maxX, i)
+        checkPlane(body, centre, radius, 0, 0, 1, basin.minZ, i)
+        checkPlane(body, centre, radius, 0, 0, -1, -basin.maxZ, i)
       }
 
       // Sloping floor, treated as the local horizontal plane under this sphere.
-      const floor = floorYAt(centre.z)
+      const floor = WATER_LEVEL - basinDepthAt(basin, centre.z)
       const penetration = floor + radius - centre.y
       if (penetration > 0) {
         _normal.set(0, 1, 0)
         _contact.set(centre.x, centre.y - radius, centre.z)
-        resolveContact(body, null, _contact, _normal, penetration, body.restitution * 0.5, 0.4)
+        resolveContact(body, null, _contact, _normal, penetration, body.restitution * 0.5, 0.4, i)
       }
     } else {
       // Out over the paving. Somebody who went over the side of the flume lands
       // here and skids to a halt, which is what would actually happen.
-      const penetration = deckY + radius - centre.y
+      const penetration = DECK_TOP + radius - centre.y
       if (penetration > 0) {
         _normal.set(0, 1, 0)
         _contact.set(centre.x, centre.y - radius, centre.z)
-        resolveContact(body, null, _contact, _normal, penetration, body.restitution * 0.3, 0.75)
+        resolveContact(body, null, _contact, _normal, penetration, body.restitution * 0.3, 0.75, i)
       }
     }
   }
+}
+
+/** The basin whose footprint, grown by `margin`, contains this point. */
+function grownBasinAt(x: number, z: number, margin: number): Basin | null {
+  for (const basin of BASINS) {
+    if (
+      x > basin.minX - margin &&
+      x < basin.maxX + margin &&
+      z > basin.minZ - margin &&
+      z < basin.maxZ + margin
+    ) {
+      return basin
+    }
+  }
+  return null
+}
+
+/**
+ * An axis-aligned box standing in the world: a tread of the entry steps.
+ *
+ * Resolved along whichever face is nearest, which is all a body outside the box
+ * needs. A body that has somehow ended up deep inside one gets pushed out the
+ * shortest way, same as the island.
+ */
+export function collideWithBox(body: RigidBody, box: Box): void {
+  if (!body.dynamic) return
+
+  for (let i = 0; i < body.spheres.length; i++) {
+    const centre = body.worldSpheres[i]!
+    const radius = body.spheres[i]!.radius
+
+    const dxMin = centre.x - box.minX
+    const dxMax = box.maxX - centre.x
+    const dyMin = centre.y - box.minY
+    const dyMax = box.maxY - centre.y
+    const dzMin = centre.z - box.minZ
+    const dzMax = box.maxZ - centre.z
+    if (
+      dxMin <= -radius ||
+      dxMax <= -radius ||
+      dyMin <= -radius ||
+      dyMax <= -radius ||
+      dzMin <= -radius ||
+      dzMax <= -radius
+    ) {
+      continue
+    }
+
+    let best = dxMin
+    let nx = -1
+    let ny = 0
+    let nz = 0
+    if (dxMax < best) {
+      best = dxMax
+      nx = 1
+      ny = 0
+      nz = 0
+    }
+    if (dyMin < best) {
+      best = dyMin
+      nx = 0
+      ny = -1
+      nz = 0
+    }
+    if (dyMax < best) {
+      best = dyMax
+      nx = 0
+      ny = 1
+      nz = 0
+    }
+    if (dzMin < best) {
+      best = dzMin
+      nx = 0
+      ny = 0
+      nz = -1
+    }
+    if (dzMax < best) {
+      best = dzMax
+      nx = 0
+      ny = 0
+      nz = 1
+    }
+
+    _normal.set(nx, ny, nz)
+    _contact.copy(centre).addScaledVector(_normal, -radius)
+    // Steps are walked on, so they hold on: barely any bounce, plenty of grip.
+    resolveContact(body, null, _contact, _normal, best + radius, body.restitution * 0.2, 0.8)
+  }
+}
+
+/**
+ * A ramped pool entry: a sloping surface with no edges to catch on.
+ *
+ * Resolved as the local plane under each sphere, with the normal taken from the
+ * surface's own gradient by finite difference. Doing it that way means the hip
+ * where the front slope meets a side slope needs no special case — the gradient
+ * simply turns, and a body sliding over it is pushed the way the paving faces.
+ */
+export function collideWithRamp(body: RigidBody, ramp: Ramp): void {
+  if (!body.dynamic) return
+
+  for (let i = 0; i < body.spheres.length; i++) {
+    const centre = body.worldSpheres[i]!
+    const radius = body.spheres[i]!.radius
+
+    const height = rampHeightAt(ramp, centre.x, centre.z)
+    if (height === null || centre.y - radius > height) continue
+
+    const e = 0.05
+    const dx = (rampHeightAt(ramp, centre.x + e, centre.z) ?? height) -
+      (rampHeightAt(ramp, centre.x - e, centre.z) ?? height)
+    const dz = (rampHeightAt(ramp, centre.x, centre.z + e) ?? height) -
+      (rampHeightAt(ramp, centre.x, centre.z - e) ?? height)
+    _normal.set(-dx / (2 * e), 1, -dz / (2 * e)).normalize()
+
+    // Distance from the sphere's centre to the surface, measured along the
+    // normal rather than straight down, so a steep slope does not read as a
+    // deeper overlap than it is.
+    const penetration = radius - (centre.y - height) * _normal.y
+    if (penetration <= 0) continue
+    _contact.copy(centre).addScaledVector(_normal, -radius)
+    resolveContact(body, null, _contact, _normal, penetration, body.restitution * 0.2, 0.85, i)
+  }
+}
+
+export interface Box {
+  minX: number
+  maxX: number
+  minY: number
+  maxY: number
+  minZ: number
+  maxZ: number
 }
 
 /**
@@ -241,11 +382,11 @@ export function collideWithStadium(body: RigidBody, shape: Stadium, topY: number
     if (-horizontal < vertical) {
       _normal.set(_outward.x, 0, _outward.z)
       _contact.copy(centre).addScaledVector(_normal, -radius)
-      resolveContact(body, null, _contact, _normal, -horizontal, body.restitution * 0.5, 0.3)
+      resolveContact(body, null, _contact, _normal, -horizontal, body.restitution * 0.5, 0.3, i)
     } else {
       _normal.set(0, 1, 0)
       _contact.set(centre.x, centre.y - radius, centre.z)
-      resolveContact(body, null, _contact, _normal, vertical, body.restitution * 0.3, 0.7)
+      resolveContact(body, null, _contact, _normal, vertical, body.restitution * 0.3, 0.7, i)
     }
   }
 }
@@ -265,10 +406,24 @@ export function collideInsideStadium(body: RigidBody, shape: Stadium, topY: numb
   for (let i = 0; i < body.spheres.length; i++) {
     const centre = body.worldSpheres[i]!
     const radius = body.spheres[i]!.radius
-    if (centre.y > topY) continue
 
     const distance = stadiumDistance(shape, centre.x, centre.z, _outward)
-    const penetration = distance + radius - shape.radius
+    const outside = distance - shape.radius
+
+    if (centre.y > topY) {
+      // Above the wall the water is behind you and the fill beyond it is
+      // paving: whatever is standing out there is standing on it. Without this
+      // face the corners are a hole you drop through on the way to the steps.
+      if (outside <= 0) continue
+      const penetration = topY + radius - centre.y
+      if (penetration <= 0) continue
+      _normal.set(0, 1, 0)
+      _contact.set(centre.x, centre.y - radius, centre.z)
+      resolveContact(body, null, _contact, _normal, penetration, body.restitution * 0.3, 0.75)
+      continue
+    }
+
+    const penetration = outside + radius
     if (penetration <= 0) continue
 
     _normal.set(-_outward.x, 0, -_outward.z)
@@ -289,13 +444,14 @@ function checkPlane(
   ny: number,
   nz: number,
   offset: number,
+  sphere: number,
 ): void {
   const signedDistance = centre.x * nx + centre.y * ny + centre.z * nz - offset
   const penetration = radius - signedDistance
   if (penetration <= 0) return
   _normal.set(nx, ny, nz)
   _contact.copy(centre).addScaledVector(_normal, -radius)
-  resolveContact(body, null, _contact, _normal, penetration, body.restitution * 0.6, 0.2)
+  resolveContact(body, null, _contact, _normal, penetration, body.restitution * 0.6, 0.2, sphere)
 }
 
 const _scratch = new Vector3()

@@ -12,6 +12,8 @@ import {
 import { AirMattress, BeachBall } from '../src/entities/PoolFloat'
 import { SwimRing } from '../src/entities/SwimRing'
 import { PhysicsWorld } from '../src/physics/PhysicsWorld'
+import { RampObstacle } from '../src/physics/BoxObstacle'
+import { RIVER_RAMP } from '../src/core/world'
 import { StadiumBank, StadiumObstacle } from '../src/physics/StadiumObstacle'
 import { stadiumDistance, type Vec2 } from '../src/core/shapes'
 import { FlowField } from '../src/sim/FlowField'
@@ -163,6 +165,9 @@ describe('the river as somewhere to float', () => {
     const physics = new PhysicsWorld(water, flow, splats)
     physics.addFeature(new StadiumObstacle(ISLAND, ISLAND_TOP))
     physics.addFeature(new StadiumBank(RIVER_BANK, ISLAND_TOP))
+    // The entry ramp sticks out into the circuit, so it belongs in this test:
+    // anything a float can be pinned against is exactly what it is checking.
+    physics.addFeature(new RampObstacle(RIVER_RAMP))
     return { water, flow, splats, physics }
   }
 

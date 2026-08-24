@@ -1,5 +1,6 @@
 import { PerspectiveCamera, Vector3 } from 'three'
-import { POOL, POOL_HALF_D, POOL_HALF_W, WATER_LEVEL, clamp } from '../core/config'
+import { WATER_LEVEL, clamp } from '../core/config'
+import { GROUNDS, floorYAt } from '../core/world'
 
 const _desired = new Vector3()
 const _offset = new Vector3()
@@ -42,12 +43,10 @@ export class FollowCamera {
     )
     _desired.copy(this.smoothedTarget).addScaledVector(_offset, this.distance)
 
-    // Do not let the camera drop through the pool floor or wander off the deck.
-    const deckLimitX = POOL_HALF_W + POOL.deckWidth - 0.4
-    const deckLimitZ = POOL_HALF_D + POOL.deckWidth - 0.4
-    _desired.x = clamp(_desired.x, -deckLimitX, deckLimitX)
-    _desired.z = clamp(_desired.z, -deckLimitZ, deckLimitZ)
-    _desired.y = Math.max(_desired.y, WATER_LEVEL - POOL.shallowDepth + 0.35)
+    // Do not let the camera drop through the floor or wander off the grounds.
+    _desired.x = clamp(_desired.x, GROUNDS.minX + 0.4, GROUNDS.maxX - 0.4)
+    _desired.z = clamp(_desired.z, GROUNDS.minZ + 0.4, GROUNDS.maxZ - 0.4)
+    _desired.y = Math.max(_desired.y, floorYAt(_desired.x, _desired.z) + 0.35)
 
     this.smoothedPosition.lerp(_desired, 1 - Math.exp(-dt * 7))
     this.camera.position.copy(this.smoothedPosition)

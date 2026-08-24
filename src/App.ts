@@ -2,6 +2,7 @@ import {
   Color,
   FogExp2,
   PerspectiveCamera,
+  Quaternion,
   Raycaster,
   Scene,
   Vector2,
@@ -14,8 +15,6 @@ import {
   MAX_STEPS_PER_FRAME,
   PHYSICS_DT,
   POOL,
-  POOL_HALF_D,
-  POOL_HALF_W,
   RIVER,
   RIVER_BANK,
   WATER_LEVEL,
@@ -23,10 +22,20 @@ import {
   WAVE_SUBSTEPS,
 } from './core/config'
 import { clampToRing, type Vec2 } from './core/shapes'
+import {
+  ALL_RAMPS,
+  CALM_POOL,
+  DOMAIN,
+  RIVER_POOL,
+  clampToBasin,
+  wetDepthAt,
+  type Basin,
+} from './core/world'
 import { Environment } from './core/Environment'
 import { FollowCamera } from './core/FollowCamera'
 import { Input } from './core/Input'
 import { attachResize, createRenderer } from './core/Renderer'
+import { FloatRider } from './entities/FloatRider'
 import { Fountain } from './entities/Fountain'
 import { AirMattress, BeachBall } from './entities/PoolFloat'
 import { Pool } from './entities/Pool'
@@ -37,6 +46,7 @@ import { SwimmerAI } from './entities/SwimmerAI'
 import { WaterSlide } from './entities/WaterSlide'
 import type { FloatingObject } from './entities/FloatingObject'
 import { PhysicsWorld } from './physics/PhysicsWorld'
+import { RampObstacle } from './physics/BoxObstacle'
 import { StadiumBank, StadiumObstacle } from './physics/StadiumObstacle'
 import { CausticsProjector } from './render/CausticsProjector'
 import { SprayParticles } from './render/SprayParticles'
@@ -87,6 +97,7 @@ export class App {
   readonly caustics: CausticsProjector
   readonly pool: Pool
   readonly slide: WaterSlide
+  readonly rider: FloatRider
   readonly fountains: Fountain[] = []
   readonly input: Input
   readonly follow: FollowCamera
@@ -114,6 +125,10 @@ export class App {
   private readonly moveAxis = { x: 0, y: 0 }
   private readonly dragState = { yaw: 0, pitch: 0, zoom: 0 }
   private submerged = false
+  private spaceHeld = false
+  /** The float the pointer has hold of, and where on it. */
+  private grabbed: FloatingObject | null = null
+  private readonly grabLocal = new Vector3()
 
   constructor(quality: AppQuality = QUALITY_PRESETS.high!) {
     const bundle = createRenderer()
@@ -126,18 +141,25 @@ export class App {
 
     this.waves = new WaveField(this.renderer, { resolution: quality.waveResolution })
     this.water = new WaveFieldCPU({
-      width: POOL.width,
-      depth: POOL.depth,
+      width: DOMAIN.width,
+      depth: DOMAIN.depth,
+      centerX: DOMAIN.centerX,
+      centerZ: DOMAIN.centerZ,
       // A quarter of the GPU field's linear resolution: enough to carry every
       // wave a floating body can feel, cheap enough to run on the main thread.
       cols: 128,
-      rows: 80,
+      rows: Math.round((128 * DOMAIN.depth) / DOMAIN.width),
+      depthAt: wetDepthAt,
       speedScale: this.waves.speedScale,
       damping: this.waves.damping,
       levelDecay: this.waves.levelDecay,
     })
 
-    this.caustics = new CausticsProjector(this.waves.normalTexture, quality.waveResolution)
+    this.caustics = new CausticsProjector(
+      this.waves.normalTexture,
+      this.waves.bathymetry,
+      quality.waveResolution,
+    )
     this.caustics.sunDirection.copy(this.environment.sunDirection)
 
     this.pool = new Pool(this.caustics)
@@ -156,23 +178,31 @@ export class App {
     this.buildCurrent()
     this.physics.addFeature(new StadiumObstacle(ISLAND, ISLAND_TOP))
     this.physics.addFeature(new StadiumBank(RIVER_BANK, WATER_LEVEL + POOL.copingHeight))
+    for (const ramp of ALL_RAMPS) this.physics.addFeature(new RampObstacle(ramp))
 
     this.slide = this.physics.addFeature(new WaterSlide())
     this.scene.add(this.slide.object)
+    this.rider = this.physics.addFeature(new FloatRider())
     this.buildFountains()
 
     this.player = this.addSwimmer(0, 0, -3.6, true)
-    for (let i = 0; i < 4; i++) {
-      const spot = inChannel(
-        (Math.random() * 2 - 1) * (POOL_HALF_W - 2),
-        (Math.random() * 2 - 1) * (POOL_HALF_D - 2),
+    for (let i = 0; i < 5; i++) {
+      // Three on the circuit, two in the ordinary pool.
+      const basin = i < 3 ? RIVER_POOL : CALM_POOL
+      const spot = inWater(
+        basin,
+        randomIn(basin.minX + 2, basin.maxX - 2),
+        randomIn(basin.minZ + 2, basin.maxZ - 2),
       )
       const swimmer = this.addSwimmer(i + 1, spot.x, spot.z, false)
-      this.ai.push(new SwimmerAI(swimmer, this.swimmers))
+      this.ai.push(new SwimmerAI(swimmer, this.swimmers, this.floats))
     }
     // The player boards whenever they steer into the circle; the AI only some
     // of the time, so there is still a pool full of people.
-    for (const swimmer of this.swimmers) this.slide.watch(swimmer, swimmer === this.player)
+    for (const swimmer of this.swimmers) {
+      this.slide.watch(swimmer, swimmer === this.player)
+      this.rider.watch(swimmer, swimmer === this.player)
+    }
 
     this.spawnFloats()
 
@@ -197,6 +227,7 @@ export class App {
    * stronger won and nothing went round.
    */
   private buildCurrent(): void {
+    this.buildCalmCurrent()
     this.flow.addChannel({
       x: ISLAND.x,
       z: ISLAND.z,
@@ -210,7 +241,7 @@ export class App {
     // Inlets in the long walls, each aimed the way the circuit already runs on
     // its own side of the island: +X below the axis, -X above it.
     this.flow.addJet({
-      x: -POOL_HALF_W + 0.15,
+      x: RIVER_POOL.minX + 0.15,
       z: -3.4,
       dirX: 1,
       dirZ: 0,
@@ -218,7 +249,7 @@ export class App {
       radius: 4,
     })
     this.flow.addJet({
-      x: POOL_HALF_W - 0.15,
+      x: RIVER_POOL.maxX - 0.15,
       z: 3.4,
       dirX: -1,
       dirZ: 0,
@@ -226,6 +257,38 @@ export class App {
       radius: 4,
     })
     this.waves.markFlowDirty()
+  }
+
+  /**
+   * The ordinary pool's water: two wall inlets and a pair of counter-rotating
+   * eddies between them.
+   *
+   * This is the arrangement the pool had before the circuit was cut into it.
+   * It works here for the same reason it stopped working there — the two
+   * eddies turn against each other, so nothing ever goes all the way round and
+   * the water just mills about. In a pool you are only swimming in, that is
+   * what you want.
+   */
+  private buildCalmCurrent(): void {
+    const midZ = (CALM_POOL.minZ + CALM_POOL.maxZ) / 2
+    this.flow.addJet({
+      x: CALM_POOL.minX + 0.15,
+      z: midZ - 2.6,
+      dirX: 1,
+      dirZ: 0.22,
+      strength: 0.72,
+      radius: 4.5,
+    })
+    this.flow.addJet({
+      x: CALM_POOL.maxX - 0.15,
+      z: midZ + 2.6,
+      dirX: -1,
+      dirZ: -0.22,
+      strength: 0.72,
+      radius: 4.5,
+    })
+    this.flow.addVortex({ x: -3.4, z: midZ + 2.2, strength: 0.34, coreRadius: 1.9 })
+    this.flow.addVortex({ x: 3.4, z: midZ - 2.2, strength: -0.34, coreRadius: 1.9 })
   }
 
   /**
@@ -257,10 +320,11 @@ export class App {
 
   private spawnFloats(): void {
     const add = (object: FloatingObject, x: number, z: number) => {
-      const spot = inChannel(x, z, 0.6)
+      const spot = inWater(basinFor(x, z), x, z, 0.6)
       object.placeAt(spot.x, spot.z, WATER_LEVEL + 0.08)
       this.scene.add(object.object)
       this.physics.add(object)
+      this.rider.add(object)
       this.floats.push(object)
       return object
     }
@@ -274,13 +338,24 @@ export class App {
     add(new AirMattress('#f7b267'), -6.4, 3.4)
     add(new BeachBall(), 1.2, 2.7)
     add(new BeachBall(), 6.6, -3.4)
+
+    const calmZ = (CALM_POOL.minZ + CALM_POOL.maxZ) / 2
+    add(new SwimRing(3), -3.2, calmZ + 2.4)
+    add(new SwimRing(1), 4.4, calmZ - 1.6)
+    add(new AirMattress('#b58cf0'), 0.4, calmZ + 3.2)
+    add(new RubberDuck(), -5.6, calmZ - 3)
+    add(new BeachBall(), 2.6, calmZ + 0.4)
   }
 
   /** Add another floating object at a random spot, for the GUI's spawn buttons. */
   spawn(kind: 'ring' | 'duck' | 'mattress' | 'ball'): void {
-    const { x, z } = inChannel(
-      (Math.random() * 2 - 1) * (POOL_HALF_W - 1.5),
-      (Math.random() * 2 - 1) * (POOL_HALF_D - 1.5),
+    // Into whichever pool the player is nearest, so the button drops it where
+    // they are looking.
+    const basin = basinFor(this.player.body.position.x, this.player.body.position.z)
+    const { x, z } = inWater(
+      basin,
+      randomIn(basin.minX + 1.5, basin.maxX - 1.5),
+      randomIn(basin.minZ + 1.5, basin.maxZ - 1.5),
     )
     const object =
       kind === 'ring'
@@ -294,6 +369,7 @@ export class App {
     object.placeAt(x, z, WATER_LEVEL + 1.6)
     this.scene.add(object.object)
     this.physics.add(object)
+    this.rider.add(object)
     this.floats.push(object)
   }
 
@@ -308,11 +384,39 @@ export class App {
     if (candidate) this.slide.send(candidate)
   }
 
+  /**
+   * Put the player on whatever float is nearest, wherever it is. For the GUI
+   * and for screenshots; ordinarily you get on one by swimming into it.
+   */
+  ridePlayerOnNearestFloat(): boolean {
+    let best: FloatingObject | null = null
+    let bestDistance = Number.POSITIVE_INFINITY
+    for (const float of this.floats) {
+      if (float.ride === null || this.rider.isRidden(float)) continue
+      const distance = float.body.position.distanceTo(this.player.body.position)
+      if (distance < bestDistance) {
+        bestDistance = distance
+        best = float
+      }
+    }
+    if (best === null) return false
+    // Drop them onto it rather than teleporting the float to them.
+    this.player.body.position.set(
+      best.body.position.x,
+      best.body.position.y + best.ride!.seatHeight,
+      best.body.position.z,
+    )
+    this.player.body.velocity.setScalar(0)
+    this.player.body.syncDerived()
+    return this.rider.mount(this.player, best)
+  }
+
   /** Remove every float that was not part of the initial set-up. */
   clearFloats(): void {
-    for (const object of this.floats.splice(9)) {
+    for (const object of this.floats.splice(14)) {
       this.scene.remove(object.object)
       this.physics.remove(object)
+      this.rider.remove(object)
     }
   }
 
@@ -358,12 +462,90 @@ export class App {
     }
 
     this.player.sprint = this.input.isDown('ShiftLeft', 'ShiftRight') ? 1 : 0
-    this.player.pitchInput = this.input.isDown('Space') ? -1 : 0
+    // Space dives in the water and jumps on land, which is the same key doing
+    // the same thing: push against whatever you are in.
+    const space = this.input.isDown('Space')
+    const riding = this.rider.isRiding(this.player)
+    this.player.pitchInput = space && !riding && this.player.pose !== 'stand' ? -1 : 0
+    if (space && !this.spaceHeld) {
+      if (riding) this.player.dismountRequested = true
+      else if (this.player.pose === 'stand') this.player.jumpRequested = true
+    }
+    this.spaceHeld = space
+
+    this.updateGrab()
 
     const click = this.input.consumeClick()
     if (click) this.splashAt(click.x, click.y)
 
     void dt
+  }
+
+  /**
+   * Picking a float up and hauling it about.
+   *
+   * A spring between where you grabbed it and where the pointer is now, capped
+   * at sixty newtons — enough to drag a swim ring across the pool, not enough
+   * to pull it out of the water or through a wall. Everything else follows: it
+   * turns as you drag it because the spring pulls at the point you took hold
+   * of, it makes a wake because it is moving through the water, and letting go
+   * throws it because it keeps the speed it had.
+   */
+  private updateGrab(): void {
+    const press = this.input.consumePress()
+    if (press !== null) {
+      const float = this.floatUnder(press.x, press.y)
+      if (float !== null) {
+        this.grabbed = float
+        this.grabLocal
+          .copy(this.scratch)
+          .sub(float.body.position)
+          .applyQuaternion(_inverse.copy(float.body.quaternion).invert())
+        this.input.suppressDrag = true
+        this.rider.setBusy(float, true)
+      }
+    }
+
+    if (this.grabbed === null) return
+    if (!this.input.pointerDown) {
+      this.rider.setBusy(this.grabbed, false)
+      this.grabbed = null
+      return
+    }
+
+    const body = this.grabbed.body
+    _hold.copy(this.grabLocal).applyQuaternion(body.quaternion).add(body.position)
+
+    this.pointer.set(this.input.pointerNdc.x, this.input.pointerNdc.y)
+    this.raycaster.setFromCamera(this.pointer, this.camera)
+    const direction = this.raycaster.ray.direction
+    if (Math.abs(direction.y) < 1e-4) return
+    // Aim at the horizontal plane the grabbed point is already on, so dragging
+    // moves it about the pool rather than lifting it into the air.
+    const t = (_hold.y - this.raycaster.ray.origin.y) / direction.y
+    if (t < 0) return
+    _target.copy(direction).multiplyScalar(t).add(this.raycaster.ray.origin)
+
+    _pull.copy(_target).sub(_hold).multiplyScalar(90 * body.mass)
+    body.pointVelocity(_hold, _handVelocity)
+    _pull.addScaledVector(_handVelocity, -18 * body.mass)
+    _pull.y = 0
+    if (_pull.length() > GRAB_FORCE) _pull.setLength(GRAB_FORCE)
+    body.addForceAtPoint(_pull, _hold)
+  }
+
+  /** The float whose mesh is under this screen point, if any. */
+  private floatUnder(ndcX: number, ndcY: number): FloatingObject | null {
+    this.pointer.set(ndcX, ndcY)
+    this.raycaster.setFromCamera(this.pointer, this.camera)
+    for (const float of this.floats) {
+      const hits = this.raycaster.intersectObject(float.object, true)
+      if (hits.length > 0 && hits[0]) {
+        this.scratch.copy(hits[0].point)
+        return float
+      }
+    }
+    return null
   }
 
   /** Turn a click into a real disturbance: a dent in the surface plus spray. */
@@ -488,16 +670,37 @@ export class App {
 
 const UP = new Vector3(0, 1, 0)
 
-/** Put a spawn point in the channel: clear of the island, inside the bank. */
-function inChannel(x: number, z: number, margin = 0.8): Vec2 {
-  return clampToRing(
-    RIVER_BANK,
-    x,
-    z,
-    ISLAND.radius + margin,
-    RIVER.outerRadius - margin,
-    _spawn,
-  )
+/** Hardest you can pull a float about with the pointer, newtons. */
+const GRAB_FORCE = 60
+
+const _hold = new Vector3()
+const _target = new Vector3()
+const _pull = new Vector3()
+const _handVelocity = new Vector3()
+const _inverse = new Quaternion()
+
+/**
+ * Put a spawn point somewhere there is actually water: in the river that means
+ * the channel between the island and the bank, in the ordinary pool it just
+ * means clear of the walls.
+ */
+function inWater(basin: Basin, x: number, z: number, margin = 0.8): Vec2 {
+  if (basin === RIVER_POOL) {
+    return clampToRing(RIVER_BANK, x, z, ISLAND.radius + margin, RIVER.outerRadius - margin, _spawn)
+  }
+  return clampToBasin(basin, x, z, margin + 0.4, _spawn)
+}
+
+/** Whichever basin a point is in or nearest to. */
+function basinFor(x: number, z: number): Basin {
+  const toCalm = Math.abs(z - (CALM_POOL.minZ + CALM_POOL.maxZ) / 2)
+  const toRiver = Math.abs(z - (RIVER_POOL.minZ + RIVER_POOL.maxZ) / 2)
+  void x
+  return toCalm < toRiver ? CALM_POOL : RIVER_POOL
+}
+
+function randomIn(lo: number, hi: number): number {
+  return lo + Math.random() * (hi - lo)
 }
 
 const _spawn: Vec2 = { x: 0, z: 0 }

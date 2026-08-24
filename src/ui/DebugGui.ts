@@ -96,26 +96,35 @@ export function createDebugGui(app: App): GuiHandle {
   }
 
   // --- Slide and fountains ---------------------------------------------------
-  const rides = gui.addFolder('Slide & fountains')
-  rides
+  const slide = gui.addFolder('Slide & fountains')
+  slide
     .add({ send: () => app.sendDownTheSlide() }, 'send')
     .name('send someone down the slide')
   const fountainState = {
     running: true,
     speed: app.fountains[0]?.speed ?? 7,
   }
-  rides
+  slide
     .add(fountainState, 'running')
     .name('fountains on')
     .onChange((value: boolean) => {
       for (const fountain of app.fountains) fountain.enabled = value
     })
-  rides
+  slide
     .add(fountainState, 'speed', 2, 11, 0.25)
     .name('jet speed')
     .onChange((value: number) => {
       for (const fountain of app.fountains) fountain.speed = value
     })
+
+  // --- Floats ----------------------------------------------------------------
+  const rides = gui.addFolder('Floats')
+  rides
+    .add({ ride: () => app.ridePlayerOnNearestFloat() }, 'ride')
+    .name('put the player on a float')
+  rides
+    .add({ off: () => app.rider.dismount(app.player) }, 'off')
+    .name('get the player off')
 
   // --- Sky ------------------------------------------------------------------
   const sky = gui.addFolder('Sky')

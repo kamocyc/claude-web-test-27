@@ -1,3 +1,4 @@
+import { floorYAt } from '../src/core/world'
 import { Vector3 } from 'three'
 import { describe, expect, it } from 'vitest'
 import {
@@ -9,7 +10,6 @@ import {
   RIVER,
   RIVER_BANK,
   WATER_LEVEL,
-  floorYAt,
 } from '../src/core/config'
 import { stadiumDistance, type Vec2 } from '../src/core/shapes'
 import { collideInsideStadium, collidePair, collideWithPool, collideWithStadium } from '../src/physics/Collide'
@@ -155,10 +155,10 @@ describe('collideWithPool', () => {
   it('lifts a body off the sloping floor at the depth for its own position', () => {
     for (const z of [-4, 0, 4]) {
       const body = ball(0.25, 30)
-      body.position.set(0, floorYAt(z) - 0.4, z)
+      body.position.set(0, floorYAt(0, z) - 0.4, z)
       body.syncDerived()
       for (let i = 0; i < 80; i++) collideWithPool(body)
-      expect(body.position.y).toBeGreaterThan(floorYAt(z) + 0.2)
+      expect(body.position.y).toBeGreaterThan(floorYAt(0, z) + 0.2)
     }
   })
 

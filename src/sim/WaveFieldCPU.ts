@@ -1,4 +1,4 @@
-import { clamp, waterDepthAt, waveSpeedAt } from '../core/config'
+import { POOL, clamp, waveSpeedAt } from '../core/config'
 import type { SplatQueue } from './WaveSplat'
 
 export interface WaveFieldCPUOptions {
@@ -6,10 +6,19 @@ export interface WaveFieldCPUOptions {
   width: number
   /** Domain extent along Z, metres. */
   depth: number
+  /** World X of the domain centre. Defaults to the origin. */
+  centerX?: number
+  /** World Z of the domain centre. Defaults to the origin. */
+  centerZ?: number
   /** Cells along X. */
   cols: number
   /** Cells along Z. */
   rows: number
+  /**
+   * Water depth at a world position, zero on land. Defaults to a single basin
+   * sloping along Z, which is what this field was before there were two pools.
+   */
+  depthAt?: (x: number, z: number) => number
   /** Multiplier on sqrt(g*h); see core/config.waveSpeedAt. */
   speedScale?: number
   /** Viscous loss: fraction of the surface's vertical rate shed per second. */
@@ -43,6 +52,8 @@ export class WaveFieldCPU {
   readonly rows: number
   readonly width: number
   readonly depth: number
+  readonly centerX: number
+  readonly centerZ: number
   readonly dx: number
   readonly dz: number
 
@@ -53,10 +64,16 @@ export class WaveFieldCPU {
   private cur: Float32Array
   private prev: Float32Array
   private next: Float32Array
-  /** Per-row stencil weight K = (c*dt/dx)^2, derived from the sloped floor. */
-  private readonly rowK: Float32Array
-  private rowKDt = -1
-  private rowKScale = -1
+  /** Water depth per cell, metres. Zero marks a cell that is dry land. */
+  private readonly cellDepth: Float32Array
+  /** Per-cell stencil weight K = (c*dt/dx)^2, from that cell's own depth. */
+  private readonly cellK: Float32Array
+  /** Indices of the cells that hold water, in order. */
+  private readonly wetCells: Int32Array
+  /** Indices of the dry cells that touch water: the ghost cells. */
+  private readonly ghostCells: Int32Array
+  private cellKDt = -1
+  private cellKScale = -1
   /** Step size the current/previous pair was produced with, for rate queries. */
   private lastDt = 1 / 240
 
@@ -65,6 +82,8 @@ export class WaveFieldCPU {
     this.rows = Math.max(4, Math.floor(options.rows))
     this.width = options.width
     this.depth = options.depth
+    this.centerX = options.centerX ?? 0
+    this.centerZ = options.centerZ ?? 0
     this.dx = options.width / this.cols
     this.dz = options.depth / this.rows
     this.speedScale = options.speedScale ?? 0.6
@@ -75,17 +94,72 @@ export class WaveFieldCPU {
     this.cur = new Float32Array(n)
     this.prev = new Float32Array(n)
     this.next = new Float32Array(n)
-    this.rowK = new Float32Array(this.rows)
+    this.cellDepth = new Float32Array(n)
+    this.cellK = new Float32Array(n)
+
+    const depthAt = options.depthAt ?? defaultDepthAt
+    const wet: number[] = []
+    for (let j = 0; j < this.rows; j++) {
+      for (let i = 0; i < this.cols; i++) {
+        const d = depthAt(this.colX(i), this.rowZ(j))
+        const idx = j * this.cols + i
+        this.cellDepth[idx] = d > 0 ? d : 0
+        if (d > 0) wet.push(idx)
+      }
+    }
+    this.wetCells = Int32Array.from(wet)
+
+    // A dry cell next to water is a ghost cell: it exists only to be read by
+    // the stencil, and it carries the average of the water beside it. That is
+    // the reflecting wall — a wave arriving at one sees its own height mirrored
+    // back — and it also means bilinear sampling right up against the island
+    // returns the water's height rather than fading towards a dry zero.
+    const ghosts: number[] = []
+    for (let j = 0; j < this.rows; j++) {
+      for (let i = 0; i < this.cols; i++) {
+        const idx = j * this.cols + i
+        if (this.cellDepth[idx]! > 0) continue
+        if (this.wetNeighbourCount(i, j) > 0) ghosts.push(idx)
+      }
+    }
+    this.ghostCells = Int32Array.from(ghosts)
+  }
+
+  private wetNeighbourCount(i: number, j: number): number {
+    let count = 0
+    if (i > 0 && this.cellDepth[j * this.cols + i - 1]! > 0) count++
+    if (i < this.cols - 1 && this.cellDepth[j * this.cols + i + 1]! > 0) count++
+    if (j > 0 && this.cellDepth[(j - 1) * this.cols + i]! > 0) count++
+    if (j < this.rows - 1 && this.cellDepth[(j + 1) * this.cols + i]! > 0) count++
+    return count
+  }
+
+  /** Water depth at a cell, metres. Zero on land. */
+  depthOf(i: number, j: number): number {
+    return this.cellDepth[j * this.cols + i]!
+  }
+
+  /**
+   * Is there water at this world position?
+   *
+   * Answered from the field's own bathymetry rather than from the world's, so
+   * anything asking — the spray, a test rig with a plain rectangular field —
+   * gets the same answer the simulation is actually using.
+   */
+  isWetAt(x: number, z: number): boolean {
+    const i = clamp(Math.round(this.gridU(x)), 0, this.cols - 1)
+    const j = clamp(Math.round(this.gridV(z)), 0, this.rows - 1)
+    return this.cellDepth[j * this.cols + i]! > 0
   }
 
   /** World Z at the centre of row j. */
   rowZ(j: number): number {
-    return -this.depth / 2 + (j + 0.5) * this.dz
+    return this.centerZ - this.depth / 2 + (j + 0.5) * this.dz
   }
 
   /** World X at the centre of column i. */
   colX(i: number): number {
-    return -this.width / 2 + (i + 0.5) * this.dx
+    return this.centerX - this.width / 2 + (i + 0.5) * this.dx
   }
 
   /**
@@ -95,23 +169,30 @@ export class WaveFieldCPU {
    * explicit update can never amplify. The cap — not the tuning knobs — is what
    * guarantees the field cannot blow up, whatever the GUI is set to.
    */
-  private updateRowK(dt: number): void {
-    if (this.rowKDt === dt && this.rowKScale === this.speedScale) return
+  private updateCellK(dt: number): void {
+    if (this.cellKDt === dt && this.cellKScale === this.speedScale) return
     const cellSize = Math.min(this.dx, this.dz)
-    for (let j = 0; j < this.rows; j++) {
-      const c = waveSpeedAt(waterDepthAt(this.rowZ(j)), this.speedScale)
+    for (let idx = 0; idx < this.cellK.length; idx++) {
+      const depth = this.cellDepth[idx]!
+      if (depth <= 0) {
+        this.cellK[idx] = 0
+        continue
+      }
+      const c = waveSpeedAt(depth, this.speedScale)
       const courant = (c * dt) / cellSize
-      this.rowK[j] = Math.min(0.24, courant * courant)
+      this.cellK[idx] = Math.min(0.24, courant * courant)
     }
-    this.rowKDt = dt
-    this.rowKScale = this.speedScale
+    this.cellKDt = dt
+    this.cellKScale = this.speedScale
   }
 
   /** Largest Courant number currently in use. Stays below 0.5 by construction. */
   maxCourant(dt: number): number {
-    this.updateRowK(dt)
+    this.updateCellK(dt)
     let worst = 0
-    for (let j = 0; j < this.rows; j++) worst = Math.max(worst, Math.sqrt(this.rowK[j]!))
+    for (let idx = 0; idx < this.cellK.length; idx++) {
+      worst = Math.max(worst, Math.sqrt(this.cellK[idx]!))
+    }
     return worst
   }
 
@@ -146,8 +227,9 @@ export class WaveFieldCPU {
       for (let i = i0; i <= i1; i++) {
         const dxx = this.colX(i) - x
         const d2 = dxx * dxx + dzz * dzz
-        const bump = strength * Math.exp(-d2 * inv2Sigma2)
         const idx = j * this.cols + i
+        if (this.cellDepth[idx]! <= 0) continue
+        const bump = strength * Math.exp(-d2 * inv2Sigma2)
         this.cur[idx]! += bump
         this.prev[idx]! += bump
       }
@@ -179,7 +261,7 @@ export class WaveFieldCPU {
    * swallowing them, and that ringing is a big part of reading as a pool.
    */
   step(dt: number): void {
-    this.updateRowK(dt)
+    this.updateCellK(dt)
     this.lastDt = dt
     // Viscous damping acts on the surface's *rate*, not its displacement.
     // Scaling the whole update instead pulls a standing bump towards zero,
@@ -187,26 +269,34 @@ export class WaveFieldCPU {
     // field's energy up rather than down.
     const rateKeep = clamp(1 - this.damping * dt, 0, 1)
     const levelKeep = clamp(1 - this.levelDecay * dt, 0, 1)
-    const { cols, rows, cur, prev, next } = this
+    const { cols, rows, cur, prev, next, cellK, wetCells } = this
 
-    for (let j = 0; j < rows; j++) {
-      const k = this.rowK[j]!
-      const kUp = 0.5 * (k + this.rowK[j > 0 ? j - 1 : 0]!)
-      const kDown = 0.5 * (k + this.rowK[j < rows - 1 ? j + 1 : rows - 1]!)
-      const rowBase = j * cols
-      const upBase = (j > 0 ? j - 1 : 0) * cols
-      const downBase = (j < rows - 1 ? j + 1 : rows - 1) * cols
-      for (let i = 0; i < cols; i++) {
-        const idx = rowBase + i
-        const h = cur[idx]!
-        const left = cur[rowBase + (i > 0 ? i - 1 : 0)]!
-        const right = cur[rowBase + (i < cols - 1 ? i + 1 : cols - 1)]!
-        const up = cur[upBase + i]!
-        const down = cur[downBase + i]!
-        const divergence = k * (left + right - 2 * h) + kUp * (up - h) + kDown * (down - h)
-        next[idx] = (h + (h - prev[idx]!) * rateKeep + divergence) * levelKeep
-      }
+    for (let w = 0; w < wetCells.length; w++) {
+      const idx = wetCells[w]!
+      const i = idx % cols
+      const j = (idx - i) / cols
+      const h = cur[idx]!
+      const k = cellK[idx]!
+
+      // A neighbour off the edge of the domain is the cell itself, which makes
+      // that face contribute nothing — the same reflecting wall the clamped
+      // lookups used to give. A neighbour on land is a ghost cell holding the
+      // water's own height, so it does the same thing.
+      const left = i > 0 ? idx - 1 : idx
+      const right = i < cols - 1 ? idx + 1 : idx
+      const up = j > 0 ? idx - cols : idx
+      const down = j < rows - 1 ? idx + cols : idx
+
+      const divergence =
+        faceWeight(k, cellK[left]!) * (cur[left]! - h) +
+        faceWeight(k, cellK[right]!) * (cur[right]! - h) +
+        faceWeight(k, cellK[up]!) * (cur[up]! - h) +
+        faceWeight(k, cellK[down]!) * (cur[down]! - h)
+
+      next[idx] = (h + (h - prev[idx]!) * rateKeep + divergence) * levelKeep
     }
+
+    this.fillGhosts(next)
 
     // Bleed the DC level by scaling *both* time levels identically. Scaling
     // only the new one would leave a height difference across the pair, i.e. a
@@ -230,43 +320,45 @@ export class WaveFieldCPU {
    * of |h| would show.
    */
   energy(dt: number): number {
-    this.updateRowK(dt)
-    const { cols, rows, cur, prev } = this
+    this.updateCellK(dt)
+    const { cols, rows, cur, prev, cellK, wetCells } = this
     const invDt2 = 1 / (dt * dt)
     let total = 0
-    for (let j = 0; j < rows; j++) {
-      const k = this.rowK[j]!
-      const kDown = 0.5 * (k + this.rowK[j < rows - 1 ? j + 1 : rows - 1]!)
-      const rowBase = j * cols
-      const downBase = (j < rows - 1 ? j + 1 : rows - 1) * cols
-      for (let i = 0; i < cols; i++) {
-        const idx = rowBase + i
-        const h = cur[idx]!
-        const hp = prev[idx]!
-        const rate = (h - hp) / dt
-        const rightIdx = rowBase + (i < cols - 1 ? i + 1 : cols - 1)
-        const downIdx = downBase + i
-        // Gradient terms pair consecutive time levels. Squaring a single level
-        // instead leaves the sum oscillating at the wave frequency: the scheme
-        // stores height and rate half a step apart, and this staggered product
-        // is the quantity it actually conserves.
-        const dxCur = cur[rightIdx]! - h
-        const dxPrev = prev[rightIdx]! - hp
-        const dzCur = cur[downIdx]! - h
-        const dzPrev = prev[downIdx]! - hp
-        total += rate * rate + invDt2 * (k * dxCur * dxPrev + kDown * dzCur * dzPrev)
-      }
+    for (let w = 0; w < wetCells.length; w++) {
+      const idx = wetCells[w]!
+      const i = idx % cols
+      const j = (idx - i) / cols
+      const k = cellK[idx]!
+      const h = cur[idx]!
+      const hp = prev[idx]!
+      const rate = (h - hp) / dt
+
+      const right = i < cols - 1 ? idx + 1 : idx
+      const down = j < rows - 1 ? idx + cols : idx
+      // Gradient terms pair consecutive time levels. Squaring a single level
+      // instead leaves the sum oscillating at the wave frequency: the scheme
+      // stores height and rate half a step apart, and this staggered product
+      // is the quantity it actually conserves.
+      const dxCur = cur[right]! - h
+      const dxPrev = prev[right]! - hp
+      const dzCur = cur[down]! - h
+      const dzPrev = prev[down]! - hp
+      total +=
+        rate * rate +
+        invDt2 *
+          (faceWeight(k, cellK[right]!) * dxCur * dxPrev +
+            faceWeight(k, cellK[down]!) * dzCur * dzPrev)
     }
     return 0.5 * total
   }
 
   /** Continuous grid coordinate (may fall outside [0, cols-1] before clamping). */
   private gridU(x: number): number {
-    return (x + this.width / 2) / this.dx - 0.5
+    return (x - this.centerX + this.width / 2) / this.dx - 0.5
   }
 
   private gridV(z: number): number {
-    return (z + this.depth / 2) / this.dz - 0.5
+    return (z - this.centerZ + this.depth / 2) / this.dz - 0.5
   }
 
   private texel(field: Float32Array, i: number, j: number): number {
@@ -322,9 +414,64 @@ export class WaveFieldCPU {
     return peak
   }
 
+  /**
+   * Give every dry cell that touches water the average height of the water
+   * beside it.
+   *
+   * With this in place the stencil needs no special case at a shore: reading a
+   * ghost cell returns (for a straight wall) exactly the reading cell's own
+   * height, so the face carries no flux and the wave reflects. Sampling gets
+   * the same benefit — `heightAt` a centimetre off the island returns the
+   * water's height instead of blending towards a dry zero.
+   */
+  private fillGhosts(field: Float32Array): void {
+    const { cols, rows, ghostCells, cellDepth } = this
+    for (let g = 0; g < ghostCells.length; g++) {
+      const idx = ghostCells[g]!
+      const i = idx % cols
+      const j = (idx - i) / cols
+      let sum = 0
+      let count = 0
+      if (i > 0 && cellDepth[idx - 1]! > 0) {
+        sum += field[idx - 1]!
+        count++
+      }
+      if (i < cols - 1 && cellDepth[idx + 1]! > 0) {
+        sum += field[idx + 1]!
+        count++
+      }
+      if (j > 0 && cellDepth[idx - cols]! > 0) {
+        sum += field[idx - cols]!
+        count++
+      }
+      if (j < rows - 1 && cellDepth[idx + cols]! > 0) {
+        sum += field[idx + cols]!
+        count++
+      }
+      field[idx] = count > 0 ? sum / count : 0
+    }
+  }
+
   reset(): void {
     this.cur.fill(0)
     this.prev.fill(0)
     this.next.fill(0)
   }
+}
+
+/**
+ * Weight of the face between two cells.
+ *
+ * The average of the two, except against land: a dry cell's weight is zero and
+ * averaging it in would halve the face and quietly absorb energy at every wall
+ * instead of reflecting it.
+ */
+function faceWeight(own: number, neighbour: number): number {
+  return neighbour > 0 ? 0.5 * (own + neighbour) : own
+}
+
+/** The single sloped basin this field described before there were two pools. */
+function defaultDepthAt(_x: number, z: number): number {
+  const t = clamp((z + POOL.depth / 2) / POOL.depth, 0, 1)
+  return POOL.shallowDepth + (POOL.deepDepth - POOL.shallowDepth) * t
 }

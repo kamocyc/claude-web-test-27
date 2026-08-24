@@ -206,22 +206,21 @@ export function applyBuoyancy(
     body.angularVelocity.multiplyScalar(damp)
   }
 
-  // Added mass. A body accelerating through water has to shove water aside, so
-  // it behaves as if it were heavier by roughly half the mass of the fluid it
-  // displaces. For a swim ring — two kilos of plastic displacing ninety litres
-  // — that is the difference between a plausible bob and fifty g of buoyancy
+  // Added mass. For a swim ring — two kilos of plastic displacing ninety litres
+  // — this is the difference between a plausible bob and fifty g of buoyancy
   // launching it out of the pool and diverging the integrator. Scaling the
   // whole accumulated force leaves every equilibrium untouched (there the net
   // force is zero) while taming the transients that break it.
+  //
+  // It is only *recorded* here. The world applies it once every force is in,
+  // including the ones features add after this pass; see RigidBody.
   //
   // Torque is scaled by the same factor. Added inertia has its own
   // distribution, but using the linear ratio is close enough at this scale and
   // avoids carrying a second tensor around.
   if (addedMassCoefficient > 0 && displacedTotal > 0) {
     const addedMass = addedMassCoefficient * WATER_DENSITY * displacedTotal
-    const scale = body.mass / (body.mass + addedMass)
-    body.force.multiplyScalar(scale)
-    body.torque.multiplyScalar(scale)
+    body.addedMassScale = body.mass / (body.mass + addedMass)
   }
 }
 

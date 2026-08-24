@@ -13,6 +13,17 @@ export class Input {
   zoomDelta = 0
   /** Normalised device coordinates of the last click on the water, or null. */
   clickNdc: { x: number; y: number } | null = null
+  /** Where the pointer went down, consumed once. Null when nothing new. */
+  pressNdc: { x: number; y: number } | null = null
+  /** Where the pointer is now, in normalised device coordinates. */
+  readonly pointerNdc = { x: 0, y: 0 }
+  /** True while a pointer is held down. */
+  pointerDown = false
+  /**
+   * Set while the pointer is doing something other than orbiting — dragging a
+   * float about. The camera then leaves the gesture alone.
+   */
+  suppressDrag = false
 
   private dragging = false
   private lastX = 0
@@ -33,29 +44,47 @@ export class Input {
     const onKeyUp = (event: KeyboardEvent) => this.held.delete(event.code)
     const onBlur = () => this.held.clear()
 
+    const toNdc = (event: PointerEvent) => ({
+      x: (event.clientX / window.innerWidth) * 2 - 1,
+      y: -(event.clientY / window.innerHeight) * 2 + 1,
+    })
+
     const onPointerDown = (event: PointerEvent) => {
       this.dragging = true
+      this.pointerDown = true
       this.movedWhileDragging = 0
       this.lastX = event.clientX
       this.lastY = event.clientY
+      const ndc = toNdc(event)
+      this.pressNdc = ndc
+      this.pointerNdc.x = ndc.x
+      this.pointerNdc.y = ndc.y
       this.element.setPointerCapture(event.pointerId)
     }
     const onPointerMove = (event: PointerEvent) => {
+      const ndc = toNdc(event)
+      this.pointerNdc.x = ndc.x
+      this.pointerNdc.y = ndc.y
       if (!this.dragging) return
       const dx = event.clientX - this.lastX
       const dy = event.clientY - this.lastY
       this.lastX = event.clientX
       this.lastY = event.clientY
       this.movedWhileDragging += Math.abs(dx) + Math.abs(dy)
+      if (this.suppressDrag) return
       this.dragYaw -= dx * 0.0055
       this.dragPitch -= dy * 0.0042
     }
     const onPointerUp = (event: PointerEvent) => {
+      this.pointerDown = false
       if (!this.dragging) return
+      const wasDragging = this.suppressDrag
       this.dragging = false
+      this.suppressDrag = false
       this.element.releasePointerCapture?.(event.pointerId)
-      // A drag orbits the camera; a tap splashes the water.
-      if (this.movedWhileDragging < 6) {
+      // A drag orbits the camera; a tap splashes the water. Neither, if the
+      // gesture was spent hauling a swim ring around.
+      if (this.movedWhileDragging < 6 && !wasDragging) {
         this.clickNdc = {
           x: (event.clientX / window.innerWidth) * 2 - 1,
           y: -(event.clientY / window.innerHeight) * 2 + 1,
@@ -112,6 +141,12 @@ export class Input {
     const click = this.clickNdc
     this.clickNdc = null
     return click
+  }
+
+  consumePress(): { x: number; y: number } | null {
+    const press = this.pressNdc
+    this.pressNdc = null
+    return press
   }
 
   dispose(): void {

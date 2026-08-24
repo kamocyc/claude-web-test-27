@@ -26,9 +26,22 @@ import {
   POOL_HALF_D,
   POOL_HALF_W,
   WATER_LEVEL,
-  floorYAt,
 } from '../core/config'
-import { clampToRing, type Stadium, type Vec2 } from '../core/shapes'
+import { clampToRing, stadiumDistance, type Stadium, type Vec2 } from '../core/shapes'
+import {
+  ALL_RAMPS,
+  BASINS,
+  CALM_POOL,
+  DECK_TOP,
+  GROUNDS,
+  RIVER_POOL,
+  basinDepthAt,
+  floorYAt,
+  rampCrest,
+  rampHeightAt,
+  type Basin,
+  type Ramp,
+} from '../core/world'
 import type { CausticsProjector } from '../render/CausticsProjector'
 import { makeDeckTexture, makeTileTexture } from '../render/textures'
 
@@ -73,52 +86,65 @@ export class Pool {
       envMapIntensity: 0.4,
     })
 
-    this.group.add(this.buildFloor())
-    for (const wall of this.buildWalls()) this.group.add(wall)
+    for (const basin of BASINS) {
+      this.group.add(this.buildFloor(basin))
+      for (const wall of this.buildWalls(basin)) this.group.add(wall)
+    }
     this.group.add(this.buildDeck())
     this.group.add(this.buildCornerFill())
-    this.group.add(this.buildCoping())
+    this.group.add(this.buildRiverCoping())
+    this.group.add(this.buildRectangularCoping(CALM_POOL))
     this.group.add(this.buildIsland())
     this.group.add(this.buildLadder())
+    for (const ramp of ALL_RAMPS) this.group.add(this.buildRamp(ramp))
     this.group.add(this.buildSurroundings())
 
     // Only the wetted surfaces need caustics; the deck is above the water.
     caustics.attach(this.interiorMaterial)
   }
 
-  /** Sloping tiled floor. */
-  private buildFloor(): Mesh {
-    const geometry = new PlaneGeometry(POOL.width, POOL.depth, 48, 30)
+  /** Sloping tiled floor for one basin. */
+  private buildFloor(basin: Basin): Mesh {
+    const width = basin.maxX - basin.minX
+    const depth = basin.maxZ - basin.minZ
+    const geometry = new PlaneGeometry(width, depth, 48, 30)
     geometry.rotateX(-Math.PI / 2)
+    geometry.translate((basin.minX + basin.maxX) / 2, 0, (basin.minZ + basin.maxZ) / 2)
     const position = geometry.attributes.position!
     for (let i = 0; i < position.count; i++) {
-      position.setY(i, floorYAt(position.getZ(i)))
+      position.setY(i, floorYAt(position.getX(i), position.getZ(i)))
     }
     position.needsUpdate = true
     geometry.computeVertexNormals()
 
     const mesh = new Mesh(geometry, this.interiorMaterial)
     mesh.receiveShadow = true
-    mesh.name = 'pool-floor'
+    mesh.name = `${basin.name}-floor`
     return mesh
   }
 
-  /** Four tiled walls, following the floor slope where it matters. */
-  private buildWalls(): Mesh[] {
-    const top = WATER_LEVEL + POOL.copingHeight
+  /** Four tiled walls for one basin, following the floor slope where it matters. */
+  private buildWalls(basin: Basin): Mesh[] {
+    const width = basin.maxX - basin.minX
+    const depth = basin.maxZ - basin.minZ
+    const centreX = (basin.minX + basin.maxX) / 2
+    const centreZ = (basin.minZ + basin.maxZ) / 2
     const walls: Mesh[] = []
 
     // Long walls run along Z, so their bottom edge follows the slope.
     for (const side of [-1, 1] as const) {
-      const geometry = new PlaneGeometry(POOL.depth, 1, 30, 6)
+      const wallX = side > 0 ? basin.maxX : basin.minX
+      const geometry = new PlaneGeometry(depth, 1, 30, 6)
       geometry.rotateY((side * Math.PI) / 2)
       const position = geometry.attributes.position!
       for (let i = 0; i < position.count; i++) {
         // Before displacement the plane spans z in [-D/2, D/2] and y in [-.5,.5].
-        const z = position.getZ(i)
+        const z = position.getZ(i) + centreZ
+        const floor = WATER_LEVEL - basinDepthAt(basin, z)
         const t = position.getY(i) + 0.5 // 0 at the bottom edge, 1 at the top
-        position.setY(i, floorYAt(z) + t * (top - floorYAt(z)))
-        position.setX(i, side * POOL_HALF_W)
+        position.setY(i, floor + t * (DECK_TOP - floor))
+        position.setX(i, wallX)
+        position.setZ(i, z)
       }
       position.needsUpdate = true
       geometry.computeVertexNormals()
@@ -129,11 +155,11 @@ export class Pool {
 
     // End walls are flat: the depth is constant along X.
     for (const side of [-1, 1] as const) {
-      const depth = POOL.shallowDepth + (POOL.deepDepth - POOL.shallowDepth) * (side > 0 ? 1 : 0)
-      const height = depth + POOL.copingHeight
-      const geometry = new PlaneGeometry(POOL.width, height)
+      const wallZ = side > 0 ? basin.maxZ : basin.minZ
+      const height = basinDepthAt(basin, wallZ) + POOL.copingHeight
+      const geometry = new PlaneGeometry(width, height)
       geometry.rotateY(side > 0 ? Math.PI : 0)
-      geometry.translate(0, top - height / 2, side * POOL_HALF_D)
+      geometry.translate(centreX, DECK_TOP - height / 2, wallZ)
       const mesh = new Mesh(geometry, this.interiorMaterial)
       mesh.receiveShadow = true
       walls.push(mesh)
@@ -142,29 +168,34 @@ export class Pool {
     return walls
   }
 
-  /** Paved deck with a pool-shaped hole in it. */
+  /**
+   * One slab of paving with a hole for each pool.
+   *
+   * The strip between the two holes is the walkway: it is ordinary deck, so
+   * anyone standing on it is held up by the same plane that catches a rider
+   * thrown off the flume.
+   */
   private buildDeck(): Mesh {
-    const outerW = POOL_HALF_W + POOL.deckWidth
-    const outerD = POOL_HALF_D + POOL.deckWidth
-
     const shape = new Shape()
-    shape.moveTo(-outerW, -outerD)
-    shape.lineTo(outerW, -outerD)
-    shape.lineTo(outerW, outerD)
-    shape.lineTo(-outerW, outerD)
+    shape.moveTo(GROUNDS.minX, GROUNDS.minZ)
+    shape.lineTo(GROUNDS.maxX, GROUNDS.minZ)
+    shape.lineTo(GROUNDS.maxX, GROUNDS.maxZ)
+    shape.lineTo(GROUNDS.minX, GROUNDS.maxZ)
     shape.closePath()
 
-    const hole = new Path()
-    hole.moveTo(-POOL_HALF_W, -POOL_HALF_D)
-    hole.lineTo(-POOL_HALF_W, POOL_HALF_D)
-    hole.lineTo(POOL_HALF_W, POOL_HALF_D)
-    hole.lineTo(POOL_HALF_W, -POOL_HALF_D)
-    hole.closePath()
-    shape.holes.push(hole)
+    for (const basin of BASINS) {
+      const hole = new Path()
+      hole.moveTo(basin.minX, basin.minZ)
+      hole.lineTo(basin.minX, basin.maxZ)
+      hole.lineTo(basin.maxX, basin.maxZ)
+      hole.lineTo(basin.maxX, basin.minZ)
+      hole.closePath()
+      shape.holes.push(hole)
+    }
 
     const geometry = new ShapeGeometry(shape)
     geometry.rotateX(-Math.PI / 2)
-    geometry.translate(0, WATER_LEVEL + POOL.copingHeight, 0)
+    geometry.translate(0, DECK_TOP, 0)
 
     const mesh = new Mesh(geometry, this.deckMaterial)
     mesh.receiveShadow = true
@@ -172,8 +203,8 @@ export class Pool {
     return mesh
   }
 
-  /** A pale lip around the water's edge, so the tiles do not meet the deck raw. */
-  private buildCoping(): Mesh {
+  /** A pale lip around the river's edge, so the tiles do not meet the deck raw. */
+  private buildRiverCoping(): Mesh {
     const lip = 0.34
     const shape = new Shape(stadiumOutline({ ...RIVER_BANK, radius: RIVER_BANK.radius + lip }, 20))
     const hole = new Path()
@@ -182,10 +213,80 @@ export class Pool {
 
     const geometry = new ShapeGeometry(shape, 4)
     geometry.rotateX(-Math.PI / 2)
-    geometry.translate(RIVER_BANK.x, WATER_LEVEL + POOL.copingHeight + 0.004, RIVER_BANK.z)
+    geometry.translate(RIVER_BANK.x, DECK_TOP + 0.004, RIVER_BANK.z)
 
     const mesh = new Mesh(geometry, this.copingMaterial)
     mesh.receiveShadow = true
+    return mesh
+  }
+
+  /** The same lip, square, for a pool that is just a rectangle. */
+  private buildRectangularCoping(basin: Basin): Mesh {
+    const lip = 0.34
+    const shape = new Shape()
+    shape.moveTo(basin.minX - lip, basin.minZ - lip)
+    shape.lineTo(basin.maxX + lip, basin.minZ - lip)
+    shape.lineTo(basin.maxX + lip, basin.maxZ + lip)
+    shape.lineTo(basin.minX - lip, basin.maxZ + lip)
+    shape.closePath()
+
+    const hole = new Path()
+    hole.moveTo(basin.minX, basin.minZ)
+    hole.lineTo(basin.minX, basin.maxZ)
+    hole.lineTo(basin.maxX, basin.maxZ)
+    hole.lineTo(basin.maxX, basin.minZ)
+    hole.closePath()
+    shape.holes.push(hole)
+
+    const geometry = new ShapeGeometry(shape)
+    geometry.rotateX(-Math.PI / 2)
+    geometry.translate(0, DECK_TOP + 0.004, 0)
+
+    const mesh = new Mesh(geometry, this.copingMaterial)
+    mesh.receiveShadow = true
+    mesh.name = `${basin.name}-coping`
+    return mesh
+  }
+
+  /**
+   * A ramped entry, drawn by evaluating the same surface function the contacts
+   * use.
+   *
+   * Sampling the collision shape rather than modelling the mesh separately is
+   * the point: what you can see you can stand on, and the hip where the front
+   * slope meets a side slope lands in exactly the same place in both.
+   */
+  private buildRamp(ramp: Ramp): Mesh {
+    const halfWidth = ramp.halfLength + ramp.run
+    const geometry = new PlaneGeometry(halfWidth * 2, ramp.run, 48, 24)
+    geometry.rotateX(-Math.PI / 2)
+    geometry.translate(ramp.centreX, 0, ramp.wallZ + (ramp.into * ramp.run) / 2)
+
+    const crest = rampCrest(ramp)
+    const position = geometry.attributes.position!
+    for (let i = 0; i < position.count; i++) {
+      let x = position.getX(i)
+      let z = position.getZ(i)
+      // The footprint is a rounded rectangle round the crest, not the square
+      // patch the grid starts as. Vertices outside it are pulled in onto the
+      // toe rather than left flat, which is what stops the ramp reading as a
+      // slab hanging above the floor at its corners.
+      const distance = stadiumDistance(crest, x, z, _toe)
+      if (distance > ramp.run) {
+        x -= _toe.x * (distance - ramp.run)
+        z -= _toe.z * (distance - ramp.run)
+        position.setX(i, x)
+        position.setZ(i, z)
+      }
+      position.setY(i, rampHeightAt(ramp, x, z) ?? ramp.bottomY)
+    }
+    position.needsUpdate = true
+    geometry.computeVertexNormals()
+
+    const mesh = new Mesh(geometry, this.interiorMaterial)
+    mesh.receiveShadow = true
+    mesh.castShadow = true
+    mesh.name = `${ramp.basin.name}-ramp`
     return mesh
   }
 
@@ -199,8 +300,8 @@ export class Pool {
    * stream and sits in the dead water for the rest of the session.
    */
   private buildCornerFill(): Mesh {
-    const top = WATER_LEVEL + POOL.copingHeight
-    const bottom = floorYAt(POOL_HALF_D) - 0.05
+    const top = DECK_TOP
+    const bottom = WATER_LEVEL - RIVER_POOL.depthAtMaxZ - 0.05
 
     const shape = new Shape()
     shape.moveTo(-POOL_HALF_W, -POOL_HALF_D)
@@ -239,7 +340,7 @@ export class Pool {
    */
   private buildIsland(): Group {
     const group = new Group()
-    const bottom = floorYAt(ISLAND.z + ISLAND.radius) - 0.05
+    const bottom = floorYAt(ISLAND.x, ISLAND.z + ISLAND.radius) - 0.05
     const height = ISLAND_TOP - bottom
 
     const geometry = new ExtrudeGeometry(new Shape(stadiumOutline(ISLAND, 16)), {
@@ -330,18 +431,20 @@ export class Pool {
   private buildSurroundings(): Group {
     const group = new Group()
     const hedge = new MeshStandardMaterial({ color: '#3f6b3a', roughness: 0.95 })
-    const deckTop = WATER_LEVEL + POOL.copingHeight
+    const deckTop = DECK_TOP
 
-    const outerW = POOL_HALF_W + POOL.deckWidth
-    const outerD = POOL_HALF_D + POOL.deckWidth
     const thickness = 0.7
     const height = 1.35
+    const midX = (GROUNDS.minX + GROUNDS.maxX) / 2
+    const midZ = (GROUNDS.minZ + GROUNDS.maxZ) / 2
+    const spanX = GROUNDS.maxX - GROUNDS.minX
+    const spanZ = GROUNDS.maxZ - GROUNDS.minZ
 
     const walls: [number, number, number, number][] = [
-      [0, -outerD - thickness / 2, (outerW + thickness) * 2, thickness],
-      [0, outerD + thickness / 2, (outerW + thickness) * 2, thickness],
-      [-outerW - thickness / 2, 0, thickness, outerD * 2],
-      [outerW + thickness / 2, 0, thickness, outerD * 2],
+      [midX, GROUNDS.minZ - thickness / 2, spanX + thickness * 2, thickness],
+      [midX, GROUNDS.maxZ + thickness / 2, spanX + thickness * 2, thickness],
+      [GROUNDS.minX - thickness / 2, midZ, thickness, spanZ],
+      [GROUNDS.maxX + thickness / 2, midZ, thickness, spanZ],
     ]
     for (const [x, z, sx, sz] of walls) {
       const mesh = new Mesh(new BoxGeometry(sx, height, sz), hedge)
@@ -360,6 +463,8 @@ export class Pool {
     for (const [x, z] of [
       [-POOL_HALF_W - 2.4, -2.8],
       [POOL_HALF_W + 2.4, 2.8],
+      [-5.4, RIVER_POOL.minZ - 2.5],
+      [5.4, CALM_POOL.minZ - 2.2],
     ] as [number, number][]) {
       const pole = new Mesh(new CylinderGeometry(0.045, 0.045, 2.4, 10), poleMaterial)
       pole.position.set(x, deckTop + 1.2, z)
@@ -403,6 +508,7 @@ export class Pool {
 }
 
 const _ring: Vec2 = { x: 0, z: 0 }
+const _toe: Vec2 = { x: 0, z: 0 }
 
 /**
  * The outline of a stadium as a closed polyline, in the shape's own XZ frame.

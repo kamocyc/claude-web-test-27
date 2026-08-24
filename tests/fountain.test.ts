@@ -28,6 +28,9 @@ import { SplatQueue } from '../src/sim/WaveSplat'
 
 const LONG_RUN_TIMEOUT = 120_000
 
+/** X of the fountain under test; offsets are given relative to it. */
+const NOZZLE_X = -5.2
+
 function scene(options: { levelDecay?: number } = {}) {
   const water = new WaveFieldCPU({
     width: POOL.width,
@@ -41,7 +44,9 @@ function scene(options: { levelDecay?: number } = {}) {
   const physics = new PhysicsWorld(water, flow, splats)
   const spray = new SprayParticles({ capacity: 4000 })
   physics.splash = spray
-  const fountain = physics.addFeature(new Fountain({ x: 0, z: 0 }))
+  // Where one really stands, in the channel. The origin is the island now, and
+  // a swimmer parked on top of an island stands up and walks about.
+  const fountain = physics.addFeature(new Fountain({ x: NOZZLE_X, z: 0 }))
   return { water, flow, splats, physics, spray, fountain }
 }
 
@@ -66,7 +71,7 @@ function overTheJet(
 ): { maxY: number; maxSpin: number; peak: number } {
   const world = scene()
   world.fountain.enabled = enabled
-  body.placeAt(x, z, WATER_LEVEL + 0.05)
+  body.placeAt(NOZZLE_X + x, z, WATER_LEVEL + 0.05)
   world.physics.add(body)
 
   let maxY = -Infinity
@@ -213,7 +218,7 @@ describe('what the jet does to the water', () => {
     () => {
       const world = scene()
       const ball = new BeachBall()
-      ball.placeAt(0, 0, 0.6)
+      ball.placeAt(NOZZLE_X, 0, 0.6)
       // Held there, so the column has something to break against for the whole
       // run rather than punting it away in the first tenth of a second.
       ball.body.dynamic = false

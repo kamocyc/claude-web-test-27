@@ -1,5 +1,6 @@
 import { ConeGeometry, CylinderGeometry, Group, Mesh, MeshStandardMaterial, Vector3 } from 'three'
-import { GRAVITY, WATER_DENSITY, WATER_LEVEL, floorYAt } from '../core/config'
+import { GRAVITY, WATER_DENSITY, WATER_LEVEL } from '../core/config'
+import { floorYAt } from '../core/world'
 import type { Stadium } from '../core/shapes'
 import { collideWithStadium } from '../physics/Collide'
 import type { PhysicsContext, WorldFeature } from '../physics/PhysicsWorld'
@@ -216,7 +217,7 @@ export class Fountain implements WorldFeature {
     const group = new Group()
     const metal = new MeshStandardMaterial({ color: '#c8d0d4', roughness: 0.3, metalness: 0.85 })
 
-    const floor = floorYAt(this.z)
+    const floor = floorYAt(this.x, this.z)
     const stem = new Mesh(
       new CylinderGeometry(this.stem.radius, this.stem.radius, this.height - floor, 10),
       metal,

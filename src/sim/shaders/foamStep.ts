@@ -18,8 +18,16 @@ uniform float uDecay;
 uniform float uChurnThreshold;
 uniform float uChurnGain;
 uniform vec2 uDomain;
+uniform sampler2D uBathymetry;
 
 void main() {
+  // Whitewater belongs to the water. Without this the advection smears foam
+  // out over the island and the walkway between the pools.
+  if (texture2D(uBathymetry, vUv).g < 0.5) {
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+
   // Semi-Lagrangian advection: look back along the current.
   vec2 flow = texture2D(uFlow, vUv).rg;
   vec2 source = vUv - (flow * uDt) / uDomain;

@@ -9,7 +9,8 @@ import {
   SphereGeometry,
   Vector3,
 } from 'three'
-import { WATER_LEVEL } from '../core/config'
+import { GRAVITY, WATER_LEVEL, clamp } from '../core/config'
+import { groundYAt } from '../core/world'
 import type { PhysicsContext } from '../physics/PhysicsWorld'
 import { FloatingObject } from './FloatingObject'
 
@@ -17,11 +18,36 @@ import { FloatingObject } from './FloatingObject'
  * What the body is doing with itself.
  *
  * `swim` is the stroke that drives everything; `stand` is a person on their
- * feet, used for the walk up the slide's steps; `ride` is prone and streamlined
- * in the flume, where the slide's shape does the steering and the swimmer only
- * has to keep from tumbling.
+ * feet — walking the deck between the two pools, or up the slide's steps;
+ * `ride` is prone and braced, in the flume or lying on a mattress; `sit` is
+ * upright with the legs hanging, which is how you are in a swim ring.
+ *
+ * Standing turns the *body* upright, not just the drawing of it. That matters
+ * because the proxy spheres run head to toe: upright, they stack into a column
+ * that stands on a ramp or a paving slab the way a person does, and the same
+ * contacts that hold a swim ring up hold the swimmer up. Nothing about walking
+ * out of the water is scripted as a result.
  */
-export type SwimmerPose = 'swim' | 'stand' | 'ride'
+export type SwimmerPose = 'swim' | 'stand' | 'ride' | 'sit'
+
+/**
+ * Water no deeper than this can be stood up in. Past it the floor is out of
+ * reach and there is nothing to do but swim.
+ */
+const WADING_DEPTH = 1.05
+
+/** How much of a surface's friction a pair of feet feels. See RigidBody. */
+const WALKING_FRICTION = 0.12
+
+/**
+ * Height of the body's centre above the ground when standing. The proxy
+ * spheres run from the head at +0.46 to the feet at -0.78, so this is where
+ * the middle of that column sits once it is upright.
+ */
+const STANDING_HEIGHT = 0.86
+
+/** Turns a prone body upright: local +Z (head) onto world +Y. */
+const UPRIGHT = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), -Math.PI / 2)
 
 export interface SwimmerColors {
   skin: string
@@ -47,6 +73,7 @@ const _handWorld = new Vector3()
 const _handPrevious = new Vector3()
 const _emitDir = new Vector3()
 const _quat = new Quaternion()
+const _delta = new Quaternion()
 
 /** Signed shortest angle from `from` to `to`. */
 function angleDelta(from: number, to: number): number {
@@ -78,6 +105,16 @@ export class Swimmer extends FloatingObject {
   sprint = 0
   /** Swimming, on their feet, or going down the slide. */
   pose: SwimmerPose = 'swim'
+  /**
+   * Set while something else owns the pose — the slide, while it is walking
+   * somebody up its steps or sending them down the flume. Everything else
+   * lets the water and the ground decide.
+   */
+  poseLocked = false
+  /** Raised for one step to push off the ground. */
+  jumpRequested = false
+  /** Raised to get off whatever is being ridden at the next opportunity. */
+  dismountRequested = false
 
   readonly colors: SwimmerColors
 
@@ -94,6 +131,7 @@ export class Swimmer extends FloatingObject {
 
   private readonly handPrevY: [number, number] = [1, 1]
   private kickTimer = 0
+  private walkPhase = 0
 
   constructor(palette = 0) {
     super({
@@ -129,6 +167,7 @@ export class Swimmer extends FloatingObject {
   faceDirection(x: number, z: number): void {
     this.desiredHeading = Math.atan2(x, z)
     _quat.setFromAxisAngle(_worldUp, this.desiredHeading)
+    if (this.pose === 'stand' || this.pose === 'sit') _quat.multiply(UPRIGHT)
     this.body.quaternion.copy(_quat)
     this.body.syncDerived()
   }
@@ -143,6 +182,20 @@ export class Swimmer extends FloatingObject {
   }
 
   applyControl(dt: number, context: PhysicsContext): void {
+    if (!this.poseLocked) this.pose = this.readPose(context)
+    if (this.pose === 'stand') {
+      this.walk(dt, context)
+      return
+    }
+    if (this.pose === 'sit') {
+      // Upright, and nothing else: the seat holds them there and the paddling
+      // goes into the float, not into them.
+      _quat.setFromAxisAngle(_worldUp, this.desiredHeading).multiply(UPRIGHT)
+      this.holdOrientation(_quat, 300, 60)
+      this.animate(dt, 0, context)
+      return
+    }
+    this.body.frictionScale = 1
     if (this.pose !== 'swim') {
       this.holdPose(dt, context)
       return
@@ -207,6 +260,110 @@ export class Swimmer extends FloatingObject {
   }
 
   /**
+   * Swimming or standing, decided by the ground rather than by a state machine.
+   *
+   * Two conditions, both about the world and neither about what the swimmer was
+   * doing a moment ago: the water here is shallow enough to stand up in, and
+   * the feet are close enough to the bottom to have reached it. Walking up the
+   * entry ramp satisfies both about half way up; stepping off the edge of the
+   * deck stops satisfying them immediately, and the swimmer falls in.
+   */
+  private readPose(context: PhysicsContext): SwimmerPose {
+    const { x, z } = this.body.position
+    const ground = groundYAt(x, z)
+    const surface = WATER_LEVEL + context.water.heightAt(x, z)
+    if (surface - ground > WADING_DEPTH) return 'swim'
+
+    let lowest = Number.POSITIVE_INFINITY
+    for (let i = 0; i < this.body.spheres.length; i++) {
+      lowest = Math.min(lowest, this.body.worldSpheres[i]!.y - this.body.spheres[i]!.radius)
+    }
+    // Feet within reach of the ground, and not a metre under it: somebody who
+    // has ended up inside a solid block is not standing on it, and pretending
+    // otherwise would have them walking about inside the island.
+    const clearance = lowest - ground
+    return clearance < 0.35 && clearance > -0.5 ? 'stand' : 'swim'
+  }
+
+  /**
+   * On their feet.
+   *
+   * The legs are a velocity servo, not a force: people walk at the speed they
+   * intend to and the ground gives them whatever traction that needs, which is
+   * both what it feels like and much better behaved than pushing with a fixed
+   * force and letting friction sort it out. Everything else — being knocked
+   * over by a wave washing up the ramp, sliding on a wet slope, falling in at
+   * the edge — is still the contacts doing their job.
+   */
+  private walk(dt: number, context: PhysicsContext): void {
+    const body = this.body
+    body.frictionScale = WALKING_FRICTION
+
+    // The legs, as a spring holding the body at standing height over whatever
+    // is underfoot. Without it a swimmer cannot get up at all: turning upright
+    // from prone swings the feet down into the ground, the contact cancels
+    // exactly that rotation, and they lie there at eighty degrees off vertical
+    // for as long as you care to watch. Applied at the centre of mass rather
+    // than at the feet, because a lifting force at the feet of a body lying
+    // flat tips it the wrong way — feet up, head down.
+    const clearance = body.position.y - groundYAt(body.position.x, body.position.z)
+    if (clearance < STANDING_HEIGHT) {
+      const push = (STANDING_HEIGHT - clearance) * 55 - body.velocity.y * 9
+      body.force.y += clamp(push, 0, GRAVITY * 3) * body.mass
+    }
+    const speed = (this.throttle > 0.1 ? 1.5 : 0) * (1 + this.sprint * 0.7)
+    _thrust.set(
+      Math.sin(this.desiredHeading) * speed - body.velocity.x,
+      0,
+      Math.cos(this.desiredHeading) * speed - body.velocity.z,
+    )
+    // Capped at about nine tenths of a g. It has to beat the entry ramp, whose
+    // slope costs four metres a second squared on its own, and it is also the
+    // only thing stopping a standing swimmer sliding back down it.
+    const accel = _thrust.length() * 6
+    if (accel > GRAVITY * 0.9) _thrust.setLength(GRAVITY * 0.9)
+    else _thrust.multiplyScalar(6)
+    body.force.addScaledVector(_thrust, body.mass)
+
+    if (this.jumpRequested) {
+      this.jumpRequested = false
+      body.velocity.y = Math.max(body.velocity.y, 3.2)
+      body.velocity.x += Math.sin(this.desiredHeading) * 1.4
+      body.velocity.z += Math.cos(this.desiredHeading) * 1.4
+    }
+
+    _quat.setFromAxisAngle(_worldUp, this.desiredHeading).multiply(UPRIGHT)
+    this.holdOrientation(_quat, 520, 90)
+
+    this.walkPhase += dt * (1.6 + Math.hypot(body.velocity.x, body.velocity.z) * 1.9)
+    this.animate(dt, 0, context)
+  }
+
+  /**
+   * Torque towards an orientation, as one axis-angle error rather than a pair
+   * of cross products.
+   *
+   * The prone swimmer only ever has to be levelled, which a single "roll my up
+   * vector onto the world's" term does. Standing has to pin all three axes —
+   * upright *and* facing somewhere — and doing that as two separate terms lets
+   * them fight each other near the poles.
+   */
+  private holdOrientation(target: Quaternion, stiffness: number, damping: number): void {
+    _delta.copy(this.body.quaternion).conjugate().premultiply(target)
+    if (_delta.w < 0) _delta.set(-_delta.x, -_delta.y, -_delta.z, -_delta.w)
+    const sin = Math.sqrt(Math.max(0, 1 - _delta.w * _delta.w))
+    if (sin > 1e-5) {
+      const angle = 2 * Math.acos(clamp(_delta.w, -1, 1))
+      _axis.set(_delta.x, _delta.y, _delta.z).multiplyScalar(angle / sin)
+      _torque.copy(_axis).multiplyScalar(stiffness)
+    } else {
+      _torque.setScalar(0)
+    }
+    _torque.addScaledVector(this.body.angularVelocity, -damping)
+    this.body.addTorque(_torque)
+  }
+
+  /**
    * Off the water: no stroke, no thrust, just enough attitude control to stay
    * the right way up.
    *
@@ -235,18 +392,27 @@ export class Swimmer extends FloatingObject {
     const { root, shoulders, elbows, hips, knees, head } = this.rig
 
     if (this.pose !== 'swim') {
-      // Standing turns the whole rig upright: it is built lying along +Z, so a
-      // quarter turn about X puts the head above the hips.
-      root.rotation.x = this.pose === 'stand' ? -Math.PI / 2 : 0
+      // The rig is never rotated any more: standing tips the body itself, so
+      // the limbs only have to do what limbs do. Every one of them hangs along
+      // -Z from its joint, which upright means straight down.
+      root.rotation.x = 0
       const stand = this.pose === 'stand'
+      const sit = this.pose === 'sit'
+      const stride = stand ? Math.sin(this.walkPhase) * 0.5 : 0
       for (let side = 0; side < 2; side++) {
-        // Every limb hangs along -Z from its joint, so standing needs the
-        // joints at rest: the quarter turn above already points them at the
-        // ground. Riding puts the arms overhead, which is +Z, half a turn away.
-        shoulders[side]!.rotation.x = stand ? -0.12 : Math.PI
+        const sign = side === 0 ? 1 : -1
+        if (sit) {
+          // Knees up and hands out, the way you sit in a ring.
+          shoulders[side]!.rotation.x = -1.1
+          elbows[side]!.rotation.x = -0.5
+          hips[side]!.rotation.x = 1.15
+          knees[side]!.rotation.x = -1.0
+          continue
+        }
+        shoulders[side]!.rotation.x = stand ? -0.12 - stride * sign * 0.5 : Math.PI
         elbows[side]!.rotation.x = stand ? -0.18 : -0.05
-        hips[side]!.rotation.x = stand ? 0.05 : 0.05
-        knees[side]!.rotation.x = stand ? -0.05 : -0.08
+        hips[side]!.rotation.x = stand ? 0.05 + stride * sign : 0.05
+        knees[side]!.rotation.x = stand ? -0.05 - Math.max(0, stride * sign) * 0.9 : -0.08
       }
       head.rotation.set(0, 0, 0)
       this.object.updateMatrixWorld(true)

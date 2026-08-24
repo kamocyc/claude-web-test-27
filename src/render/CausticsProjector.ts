@@ -12,7 +12,8 @@ import {
   type Texture,
   type WebGLRenderer,
 } from 'three'
-import { POOL, WATER_LEVEL } from '../core/config'
+import { WATER_LEVEL } from '../core/config'
+import { DOMAIN } from '../core/world'
 import { CAUSTICS_FRAG, CAUSTICS_RECEIVER_GLSL } from '../sim/shaders/caustics'
 import { FullScreenPass } from './FullScreenPass'
 
@@ -28,8 +29,8 @@ export class CausticsProjector {
   intensity = 1.15
   readonly tint = new Color('#cfeeff')
 
-  constructor(normalTexture: Texture, resolution = 512) {
-    const height = Math.round((resolution * POOL.depth) / POOL.width)
+  constructor(normalTexture: Texture, bathymetry: Texture, resolution = 512) {
+    const height = Math.round((resolution * DOMAIN.depth) / DOMAIN.width)
     this.target = new WebGLRenderTarget(resolution, height, {
       type: HalfFloatType,
       format: RGBAFormat,
@@ -44,10 +45,9 @@ export class CausticsProjector {
     this.pass = new FullScreenPass(CAUSTICS_FRAG, {
       uNormal: { value: normalTexture },
       uTexel: { value: new Vector2(1 / resolution, 1 / height) },
-      uDomain: { value: new Vector2(POOL.width, POOL.depth) },
+      uDomain: { value: new Vector2(DOMAIN.width, DOMAIN.depth) },
       uSunDirection: { value: this.sunDirection },
-      uShallowDepth: { value: POOL.shallowDepth },
-      uDeepDepth: { value: POOL.deepDepth },
+      uBathymetry: { value: bathymetry },
       uStrength: { value: 0.6 },
     })
   }
@@ -67,7 +67,8 @@ export class CausticsProjector {
   attach(material: MeshStandardMaterial): void {
     const uniforms = {
       uCaustics: { value: this.texture },
-      uCausticsDomain: { value: new Vector2(POOL.width, POOL.depth) },
+      uCausticsDomain: { value: new Vector2(DOMAIN.width, DOMAIN.depth) },
+      uCausticsCentre: { value: new Vector2(DOMAIN.centerX, DOMAIN.centerZ) },
       uCausticsSun: { value: this.sunDirection },
       uCausticsWaterLevel: { value: WATER_LEVEL },
       uCausticsIntensity: { value: this.intensity },

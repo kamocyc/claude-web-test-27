@@ -6,7 +6,8 @@ import {
   ShaderMaterial,
   Vector3,
 } from 'three'
-import { GRAVITY, POOL_HALF_D, POOL_HALF_W, WATER_LEVEL } from '../core/config'
+import { GRAVITY, WATER_LEVEL } from '../core/config'
+import { groundYAt } from '../core/world'
 import type { SplashOptions } from '../physics/PhysicsWorld'
 import type { FlowField, Vec2 } from '../sim/FlowField'
 import type { WaveFieldCPU } from '../sim/WaveFieldCPU'
@@ -202,8 +203,11 @@ export class SprayParticles {
       const y = this.positions[p + 1]! + this.velocities[p + 1]! * dt
       const z = this.positions[p + 2]! + this.velocities[p + 2]! * dt
 
-      const surface = WATER_LEVEL + water.heightAt(x, z)
-      const insidePool = Math.abs(x) < POOL_HALF_W && Math.abs(z) < POOL_HALF_D
+      // A droplet ends on whatever is under it: the moving surface where there
+      // is water, the paving or the island where there is not. Without the
+      // second case the ones thrown onto the deck fall on through it to y = 0.
+      const insidePool = water.isWetAt(x, z)
+      const surface = insidePool ? WATER_LEVEL + water.heightAt(x, z) : groundYAt(x, z)
 
       if (y <= surface && this.velocities[p + 1]! < 0) {
         if (insidePool) {

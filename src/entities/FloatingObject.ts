@@ -2,6 +2,8 @@ import { Group, Object3D, Vector3 } from 'three'
 import { WATER_LEVEL } from '../core/config'
 import type { BuoyancyOptions } from '../physics/Buoyancy'
 import type { PhysicsActor, PhysicsContext } from '../physics/PhysicsWorld'
+import type { DeformableShell } from '../physics/DeformableShell'
+import type { RideSpec } from './FloatRider'
 import { RigidBody, type BodySphere } from '../physics/RigidBody'
 
 export interface FloatingObjectOptions {
@@ -32,6 +34,14 @@ export abstract class FloatingObject implements PhysicsActor {
   readonly body: RigidBody
   readonly object: Object3D
   buoyancy: BuoyancyOptions
+  /**
+   * Set by subclasses that are inflatable. The shell owns the proxy sphere
+   * radii from then on, so the body is still rigid in the solver's eyes while
+   * being a different shape every step.
+   */
+  shell: DeformableShell | null = null
+  /** Set by floats you can climb onto. Null for anything you cannot. */
+  ride: RideSpec | null = null
   private readonly splashThreshold: number
   private wasAboveSurface = true
   /** Radius of the sphere that `lowestPoint` last reported. */
@@ -73,7 +83,14 @@ export abstract class FloatingObject implements PhysicsActor {
     this.object.quaternion.copy(this.body.quaternion)
   }
 
-  postStep(_dt: number, context: PhysicsContext): void {
+  postStep(dt: number, context: PhysicsContext): void {
+    // Deformation first: it reads the contact impulses this step recorded and
+    // rewrites the sphere radii, which is what the next step's buoyancy and
+    // contacts will see. Then the mesh is fitted to the result.
+    if (this.shell !== null) {
+      this.shell.update(this.body, dt)
+      this.skin(this.shell)
+    }
     this.syncTransform()
 
     // Spray on entry: the moment the body's lowest point crosses the surface
@@ -113,6 +130,9 @@ export abstract class FloatingObject implements PhysicsActor {
     }
     this.wasAboveSurface = above
   }
+
+  /** Fit the mesh to the deformed shell. Subclasses with a shell override it. */
+  protected skin(_shell: DeformableShell): void {}
 
   /** Lowest sphere surface point, where an impact would first break the water. */
   private lowestPoint(): Vector3 {

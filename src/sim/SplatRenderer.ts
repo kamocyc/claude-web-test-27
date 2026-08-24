@@ -14,7 +14,7 @@ import {
   type WebGLRenderTarget,
   type WebGLRenderer,
 } from 'three'
-import { POOL } from '../core/config'
+import { DOMAIN } from '../core/world'
 import type { SplatQueue } from './WaveSplat'
 
 const VERTEX = /* glsl */ `
@@ -24,6 +24,7 @@ attribute vec2 aCentre;
 attribute vec2 aShape;   // x = sigma (metres), y = amount
 
 uniform vec2 uDomain;
+uniform vec2 uCentre;
 
 varying vec2 vOffset;
 varying float vSigma;
@@ -38,7 +39,7 @@ void main() {
   vAmount = aShape.y;
 
   vec2 world = aCentre + vOffset;
-  gl_Position = vec4((world / uDomain) * 2.0, 0.0, 1.0);
+  gl_Position = vec4(((world - uCentre) / uDomain) * 2.0, 0.0, 1.0);
 }
 `
 
@@ -102,7 +103,8 @@ export class SplatRenderer {
       vertexShader: VERTEX,
       fragmentShader: FRAGMENT,
       uniforms: {
-        uDomain: { value: new Vector2(POOL.width, POOL.depth) },
+        uDomain: { value: new Vector2(DOMAIN.width, DOMAIN.depth) },
+        uCentre: { value: new Vector2(DOMAIN.centerX, DOMAIN.centerZ) },
         uMask: { value: new Vector4(1, 1, 0, 0) },
       },
       transparent: true,

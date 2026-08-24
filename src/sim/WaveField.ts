@@ -13,7 +13,9 @@ import {
   type TextureDataType,
   type WebGLRenderer,
 } from 'three'
-import { POOL, PHYSICS_DT, clamp } from '../core/config'
+import { PHYSICS_DT, clamp } from '../core/config'
+import { DOMAIN, wetDepthAt } from '../core/world'
+import { buildBathymetry } from './Bathymetry'
 import { FullScreenPass } from '../render/FullScreenPass'
 import type { FlowField, Vec2 } from './FlowField'
 import { FOAM_STEP_FRAG } from './shaders/foamStep'
@@ -83,8 +85,10 @@ function createTarget(
  * normal operation.
  */
 export class WaveField {
-  readonly width = POOL.width
-  readonly depth = POOL.depth
+  readonly width = DOMAIN.width
+  readonly depth = DOMAIN.depth
+  readonly centerX = DOMAIN.centerX
+  readonly centerZ = DOMAIN.centerZ
   readonly resolutionX: number
   readonly resolutionY: number
   readonly cellSize: number
@@ -114,15 +118,23 @@ export class WaveField {
   /** Coarse RG texture of the current, shared by foam advection and the water shader. */
   readonly flowTexture: DataTexture
   private readonly flowWidth = 64
-  private readonly flowHeight = 40
+  private readonly flowHeight = Math.round((64 * DOMAIN.depth) / DOMAIN.width)
   private readonly flowData: Float32Array
   private flowDirty = true
+  /** R = depth, G = wet. Shared by the step, the foam and the caustics. */
+  readonly bathymetry: DataTexture
 
   constructor(renderer: WebGLRenderer, options: WaveFieldOptions = {}) {
     const resolution = options.resolution ?? 512
     this.resolutionX = resolution
-    this.resolutionY = Math.round((resolution * POOL.depth) / POOL.width)
-    this.cellSize = POOL.width / this.resolutionX
+    this.resolutionY = Math.round((resolution * DOMAIN.depth) / DOMAIN.width)
+    // The stencil's stability margin is set by the *smallest* cell dimension,
+    // the same choice WaveFieldCPU makes. The two are within a percent of each
+    // other here because the resolution follows the domain's aspect ratio.
+    this.cellSize = Math.min(
+      DOMAIN.width / this.resolutionX,
+      DOMAIN.depth / this.resolutionY,
+    )
 
     this.speedScale = options.speedScale ?? 0.6
     this.damping = options.damping ?? 0.3
@@ -174,6 +186,8 @@ export class WaveField {
     this.flowTexture.wrapT = ClampToEdgeWrapping
     this.flowTexture.needsUpdate = true
 
+    this.bathymetry = buildBathymetry(this.resolutionX, this.resolutionY, DOMAIN, wetDepthAt)
+
     const texel = new Vector2(1 / this.resolutionX, 1 / this.resolutionY)
 
     this.copyPass = new FullScreenPass(COPY_FRAG, { uState: { value: null } })
@@ -183,8 +197,7 @@ export class WaveField {
       uTexel: { value: texel },
       uRateKeep: { value: 1 },
       uLevelKeep: { value: 1 },
-      uShallowDepth: { value: POOL.shallowDepth },
-      uDeepDepth: { value: POOL.deepDepth },
+      uBathymetry: { value: this.bathymetry },
       uSpeedScale: { value: this.speedScale },
       uDt: { value: PHYSICS_DT },
       uCellSize: { value: this.cellSize },
@@ -193,7 +206,9 @@ export class WaveField {
     this.normalPass = new FullScreenPass(WAVE_NORMAL_FRAG, {
       uState: { value: null },
       uTexel: { value: texel },
-      uCell: { value: new Vector2(POOL.width / this.resolutionX, POOL.depth / this.resolutionY) },
+      uCell: {
+        value: new Vector2(DOMAIN.width / this.resolutionX, DOMAIN.depth / this.resolutionY),
+      },
     })
 
     this.foamPass = new FullScreenPass(FOAM_STEP_FRAG, {
@@ -204,7 +219,8 @@ export class WaveField {
       uDecay: { value: this.foamDecay },
       uChurnThreshold: { value: this.foamChurnThreshold },
       uChurnGain: { value: this.foamChurnGain },
-      uDomain: { value: new Vector2(POOL.width, POOL.depth) },
+      uDomain: { value: new Vector2(DOMAIN.width, DOMAIN.depth) },
+      uBathymetry: { value: this.bathymetry },
     })
   }
 
@@ -227,9 +243,9 @@ export class WaveField {
     const out: Vec2 = { x: 0, z: 0 }
     let i = 0
     for (let j = 0; j < this.flowHeight; j++) {
-      const z = ((j + 0.5) / this.flowHeight - 0.5) * POOL.depth
+      const z = DOMAIN.centerZ + ((j + 0.5) / this.flowHeight - 0.5) * DOMAIN.depth
       for (let k = 0; k < this.flowWidth; k++) {
-        const x = ((k + 0.5) / this.flowWidth - 0.5) * POOL.width
+        const x = DOMAIN.centerX + ((k + 0.5) / this.flowWidth - 0.5) * DOMAIN.width
         flow.velocityAt(x, z, out)
         this.flowData[i++] = out.x
         this.flowData[i++] = out.z
@@ -347,5 +363,6 @@ export class WaveField {
     this.foamPass.dispose()
     this.splatRenderer.dispose()
     this.flowTexture.dispose()
+    this.bathymetry.dispose()
   }
 }

@@ -68,9 +68,60 @@ export class RigidBody {
   linearDragRate: number
   angularDamping: number
   dynamic: boolean
+  /**
+   * Multiplier on the friction of every contact this body makes.
+   *
+   * One is an object resting on a surface. A walking swimmer turns it right
+   * down: feet are not a block being dragged, and Coulomb friction against a
+   * body being driven by its own control forces cancels most of the drive —
+   * the first attempt at climbing the entry ramp managed three centimetres a
+   * second. The controller supplies the braking instead, which is what the
+   * legs are doing in any case.
+   */
+  frictionScale = 1
+
+  /**
+   * Added-mass factor for this step, set by the buoyancy pass and applied once
+   * every force is in.
+   *
+   * A body accelerating through water has to shove water aside, so it behaves
+   * as if it were heavier by roughly half the mass of the fluid it displaces.
+   * For a swim ring — two kilos of plastic displacing a hundred litres — that
+   * is a factor of about twenty-five, and it must apply to *every* force the
+   * body takes, not just the buoyant one. Scaling only part of them moves the
+   * equilibrium: a thirty-newton push from something that skipped the scaling
+   * beats a thousand newtons of buoyancy that did not, and the ring sinks.
+   */
+  addedMassScale = 1
+
+  /** Fold this step's added mass into the accumulated force and torque. */
+  applyAddedMass(): void {
+    if (this.addedMassScale === 1) return
+    this.force.multiplyScalar(this.addedMassScale)
+    this.torque.multiplyScalar(this.addedMassScale)
+    this.addedMassScale = 1
+  }
 
   /** Largest distance from the origin to a sphere surface — a bounding radius. */
   readonly boundingRadius: number
+
+  /**
+   * Normal impulse each sphere took from contacts this step, in newton-seconds.
+   *
+   * Only deformable bodies read it, and this is the honest place to measure the
+   * load on them: it is the actual impulse the solver applied, at the sphere it
+   * was applied to. A swim ring dips where somebody is sitting because that is
+   * where the contact is, not because anything is looking for riders.
+   */
+  readonly sphereLoad: Float32Array
+  /**
+   * Impulse-weighted contact normal on each sphere, packed as xyz triples.
+   *
+   * A ring only needs to know how hard it was pressed — its tube squashes
+   * radially whatever pushes it. A ball needs to know which way: it flattens
+   * against the thing it hit and bulges at right angles to it.
+   */
+  readonly sphereLoadNormal: Float32Array
 
   constructor(options: RigidBodyOptions) {
     this.spheres = options.spheres.map((s) => ({ local: s.local.clone(), radius: s.radius }))
@@ -91,6 +142,8 @@ export class RigidBody {
     }
     this.volume = options.volume ?? sphereVolume
     this.boundingRadius = bounding
+    this.sphereLoad = new Float32Array(this.spheres.length)
+    this.sphereLoadNormal = new Float32Array(this.spheres.length * 3)
 
     this.computeInertiaFromSpheres()
     this.syncDerived()
@@ -141,6 +194,23 @@ export class RigidBody {
   clearForces(): void {
     this.force.setScalar(0)
     this.torque.setScalar(0)
+  }
+
+  /** Note a contact impulse on one sphere, and which way it pushed. */
+  recordLoad(index: number, impulse: number, normal?: Vector3): void {
+    if (index < 0 || index >= this.sphereLoad.length) return
+    this.sphereLoad[index]! += impulse
+    if (normal === undefined) return
+    const base = index * 3
+    this.sphereLoadNormal[base]! += normal.x * impulse
+    this.sphereLoadNormal[base + 1]! += normal.y * impulse
+    this.sphereLoadNormal[base + 2]! += normal.z * impulse
+  }
+
+  /** Forget the loads once whatever cares about them has read them. */
+  clearLoads(): void {
+    this.sphereLoad.fill(0)
+    this.sphereLoadNormal.fill(0)
   }
 
   addForce(force: Vector3): void {

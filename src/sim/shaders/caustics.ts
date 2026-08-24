@@ -14,8 +14,7 @@ uniform sampler2D uNormal;
 uniform vec2 uTexel;
 uniform vec2 uDomain;
 uniform vec3 uSunDirection;
-uniform float uShallowDepth;
-uniform float uDeepDepth;
+uniform sampler2D uBathymetry;
 uniform float uStrength;
 
 const float IOR_AIR_TO_WATER = 0.7519; // 1.0 / 1.33
@@ -24,12 +23,17 @@ vec2 landingPoint(vec2 uv) {
   vec4 surface = texture2D(uNormal, uv);
   vec3 normal = normalize(surface.xyz);
   vec3 refracted = refract(-uSunDirection, normal, IOR_AIR_TO_WATER);
-  float floorDepth = uShallowDepth + (uDeepDepth - uShallowDepth) * uv.y;
+  float floorDepth = texture2D(uBathymetry, uv).r;
   float travel = (floorDepth + surface.w) / max(-refracted.y, 1e-3);
   return uv + (refracted.xz * travel) / uDomain;
 }
 
 void main() {
+  if (texture2D(uBathymetry, vUv).g < 0.5) {
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+
   vec2 centre = landingPoint(vUv);
   vec2 alongX = landingPoint(vUv + vec2(uTexel.x, 0.0)) - centre;
   vec2 alongZ = landingPoint(vUv + vec2(0.0, uTexel.y)) - centre;
@@ -55,6 +59,7 @@ void main() {
 export const CAUSTICS_RECEIVER_GLSL = /* glsl */ `
 uniform sampler2D uCaustics;
 uniform vec2 uCausticsDomain;
+uniform vec2 uCausticsCentre;
 uniform vec3 uCausticsSun;
 uniform float uCausticsWaterLevel;
 uniform float uCausticsIntensity;
@@ -67,7 +72,7 @@ vec3 poolCaustics() {
 
   vec3 refracted = refract(-normalize(uCausticsSun), vec3(0.0, 1.0, 0.0), 0.7519);
   vec2 back = (refracted.xz * (below / max(-refracted.y, 1e-3))) / uCausticsDomain;
-  vec2 uv = vPoolWorldPos.xz / uCausticsDomain + 0.5 - back;
+  vec2 uv = (vPoolWorldPos.xz - uCausticsCentre) / uCausticsDomain + 0.5 - back;
 
   // Deep floor near the far wall is lit by surface that lies outside the
   // simulated domain, so the lookup runs off the edge of the texture. Fade it

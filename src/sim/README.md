@@ -46,8 +46,35 @@ ripples that only exist on the GPU field are a visual detail that would move
 nothing anyway.
 
 Both fields use texel-centred cells, so cell `(i, j)` sits at the same fraction
-of the pool in each, and both derive their wave speed from the same
-`waterDepthAt`.
+of the domain in each, and both derive their wave speed from the same
+bathymetry.
+
+## Two pools in one field
+
+The domain covers both basins and the paving between them, and it is not centred
+on the origin any more, so everything that maps world XZ onto the field — the
+height texture, the splat renderer, the caustics, the surface mesh — carries the
+centre as well as the size.
+
+What separates the two pools is a **bathymetry**: water depth per cell, zero on
+land, built once from `core/world` and shared by the wave step, the foam and the
+caustics. Depth sets the local wave speed, which used to be a formula in Z alone
+and cannot be when two basins with different floors share one field. And the
+zeroes are the walls: a cell whose neighbour is dry has no neighbour there, so
+that face carries no flux and the wave reflects.
+
+The two fields reach that the same way by different routes. The GPU substitutes
+the reading texel's own height when it samples a dry one. The CPU writes that
+height *into* the dry cell — a ghost cell holding the average of the water beside
+it — which does the same thing for the stencil and additionally means bilinear
+sampling a centimetre off the island returns the water's height rather than
+fading towards a dry zero, which matters because that is what buoyancy reads.
+The two agree everywhere except inside a concave corner, where the CPU averages
+the two shores that meet there.
+
+This also fixed something that had always been wrong: before the mask, ripples
+crossed the island and the filled-in corners as though they were not there. They
+were invisible only because those blocks stand above the water line.
 
 ## The scheme
 
@@ -62,6 +89,10 @@ h(t+1) = h(t) + (h(t) - h(t-1)) * rateKeep + div(c^2 grad h)
   `div(c^2 grad h)` — with face weights averaged between adjacent cells — keeps
   energy honest as a wave shoals into the shallow end. The naive
   `c^2 * laplacian(h)` quietly manufactures amplitude there.
+- **Face weights against land.** The average of the two cells either side,
+  except where the neighbour is dry: a dry cell's weight is zero, and averaging
+  it in would halve the face and quietly absorb energy at every wall instead of
+  reflecting it.
 - **Stability.** Each stencil weight `K = (c dt / dx)^2` is capped at 0.24, so
   the four weights sum to at most 0.96 and the update can never amplify. The cap,
   not the tuning knobs, is what guarantees the field stays finite whatever the
@@ -208,6 +239,13 @@ against the outer bank: with a symmetric profile it would be sitting in still
 water and would stop there for good. `tests/lazyRiver.test.ts` measures the
 speed against that bank for exactly this reason.
 
+The calm pool's water is the arrangement this pool had before the circuit was
+cut into it: two wall inlets and a pair of counter-rotating eddies. It works
+there for the reason it stopped working here — the eddies turn against each
+other, so nothing goes round and the water just mills about.
+
 `FoamField` advects that foam semi-Lagrangian along the current, decays it, and
 deposits more wherever the surface is churning (read straight off the two stored
-time levels) or wherever a splat asked for it.
+time levels) or wherever a splat asked for it. It is masked by the bathymetry
+too: without that the advection smears whitewater out over the island and across
+the walkway.

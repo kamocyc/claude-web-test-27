@@ -32,21 +32,43 @@ uniform float uRateKeep;
 uniform float uLevelKeep;
 ${WAVE_SPEED_GLSL}
 
+/**
+ * A neighbour's height and the weight of the face leading to it.
+ *
+ * On land there is no neighbour: the reading texel gets its own height back,
+ * so the face carries no flux and the wave bounces. WaveFieldCPU reaches the
+ * same place by writing that height into the dry cell itself; the two agree
+ * everywhere except inside a concave corner, where the CPU averages the two
+ * shores that meet there.
+ */
+vec2 neighbour(vec2 uv, float h, float k) {
+  vec2 bathymetry = bathymetryAt(uv);
+  if (bathymetry.g < 0.5) return vec2(h, k);
+  return vec2(texture2D(uState, uv).r, stencilWeight(bathymetry.r));
+}
+
 void main() {
+  vec2 own = bathymetryAt(vUv);
+  if (own.g < 0.5) {
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    return;
+  }
+
   vec4 state = texture2D(uState, vUv);
   float h = state.r;
   float hPrev = state.g;
+  float k = stencilWeight(own.r);
 
-  float left = texture2D(uState, vec2(vUv.x - uTexel.x, vUv.y)).r;
-  float right = texture2D(uState, vec2(vUv.x + uTexel.x, vUv.y)).r;
-  float up = texture2D(uState, vec2(vUv.x, vUv.y - uTexel.y)).r;
-  float down = texture2D(uState, vec2(vUv.x, vUv.y + uTexel.y)).r;
+  vec2 left = neighbour(vec2(vUv.x - uTexel.x, vUv.y), h, k);
+  vec2 right = neighbour(vec2(vUv.x + uTexel.x, vUv.y), h, k);
+  vec2 up = neighbour(vec2(vUv.x, vUv.y - uTexel.y), h, k);
+  vec2 down = neighbour(vec2(vUv.x, vUv.y + uTexel.y), h, k);
 
-  float k = stencilWeight(vUv.y);
-  float kUp = 0.5 * (k + stencilWeight(vUv.y - uTexel.y));
-  float kDown = 0.5 * (k + stencilWeight(vUv.y + uTexel.y));
-
-  float divergence = k * (left + right - 2.0 * h) + kUp * (up - h) + kDown * (down - h);
+  float divergence =
+    0.5 * (k + left.y) * (left.x - h) +
+    0.5 * (k + right.y) * (right.x - h) +
+    0.5 * (k + up.y) * (up.x - h) +
+    0.5 * (k + down.y) * (down.x - h);
   float next = (h + (h - hPrev) * uRateKeep + divergence) * uLevelKeep;
 
   gl_FragColor = vec4(next, h * uLevelKeep, 0.0, 1.0);

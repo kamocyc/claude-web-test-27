@@ -2,8 +2,11 @@ import { Vector3 } from 'three'
 import { describe, expect, it } from 'vitest'
 import {
   GRAVITY,
+  ISLAND,
+  ISLAND_TOP,
   PHYSICS_DT,
   POOL,
+  RIVER_BANK,
   SLIDE,
   WATER_LEVEL,
   WAVE_DT,
@@ -15,6 +18,7 @@ import { Swimmer } from '../src/entities/Swimmer'
 import { WaterSlide } from '../src/entities/WaterSlide'
 import type { FloatingObject } from '../src/entities/FloatingObject'
 import { PhysicsWorld } from '../src/physics/PhysicsWorld'
+import { StadiumBank, StadiumObstacle } from '../src/physics/StadiumObstacle'
 import { FlowField } from '../src/sim/FlowField'
 import { WaveFieldCPU } from '../src/sim/WaveFieldCPU'
 import { SplatQueue } from '../src/sim/WaveSplat'
@@ -38,6 +42,12 @@ function world() {
   const splats = new SplatQueue()
   const physics = new PhysicsWorld(water, flow, splats)
   const slide = physics.addFeature(new WaterSlide())
+  // The island and the bank belong here even though this is a slide test: they
+  // are what keeps a rider who has just landed in the water rather than adrift
+  // over the filled-in corner, and "nobody is stranded" is one of the things
+  // being checked.
+  physics.addFeature(new StadiumObstacle(ISLAND, ISLAND_TOP))
+  physics.addFeature(new StadiumBank(RIVER_BANK, ISLAND_TOP))
   return { water, flow, splats, physics, slide }
 }
 

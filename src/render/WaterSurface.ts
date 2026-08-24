@@ -20,7 +20,8 @@ import {
   type Texture,
   type WebGLRenderer,
 } from 'three'
-import { POOL, WATER_LEVEL } from '../core/config'
+import { WATER_LEVEL } from '../core/config'
+import { DOMAIN, isWet } from '../core/world'
 import type { SkyUniforms } from '../core/Environment'
 import type { WaveField } from '../sim/WaveField'
 import { PlanarReflection } from './PlanarReflection'
@@ -80,10 +81,10 @@ export class WaterSurface {
     this.rippleTexture = makeRippleNormalTexture()
 
     const geometry = new PlaneGeometry(
-      POOL.width,
-      POOL.depth,
+      DOMAIN.width,
+      DOMAIN.depth,
       segments,
-      Math.round((segments * POOL.depth) / POOL.width),
+      Math.round((segments * DOMAIN.depth) / DOMAIN.width),
     )
     geometry.rotateX(-Math.PI / 2)
 
@@ -103,7 +104,7 @@ export class WaterSurface {
         uReflection: { value: this.reflection.texture },
         uReflectionMatrix: { value: this.reflection.textureMatrix },
         uResolution: { value: this.resolution },
-        uDomain: { value: new Vector2(POOL.width, POOL.depth) },
+        uDomain: { value: new Vector2(DOMAIN.width, DOMAIN.depth) },
         uCameraNear: { value: 0.1 },
         uCameraFar: { value: 400 },
         uTime: { value: 0 },
@@ -126,7 +127,10 @@ export class WaterSurface {
     })
 
     this.mesh = new Mesh(geometry, this.material)
-    this.mesh.position.y = WATER_LEVEL
+    // The domain is not centred on the origin any more; the mesh carries the
+    // offset so the vertex shader's `position.xz / uDomain + 0.5` lookup stays
+    // exactly as it was.
+    this.mesh.position.set(DOMAIN.centerX, WATER_LEVEL, DOMAIN.centerZ)
     this.mesh.renderOrder = 10
     this.mesh.frustumCulled = false
     this.mesh.name = 'water-surface'
@@ -196,7 +200,7 @@ export class WaterSurface {
     const t = (WATER_LEVEL - origin.y) / direction.y
     if (t < 0) return false
     out.copy(direction).multiplyScalar(t).add(origin)
-    return Math.abs(out.x) <= POOL.width / 2 && Math.abs(out.z) <= POOL.depth / 2
+    return isWet(out.x, out.z)
   }
 
   dispose(): void {

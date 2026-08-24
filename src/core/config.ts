@@ -30,16 +30,11 @@ export const POOL = {
 export const POOL_HALF_W = POOL.width / 2
 export const POOL_HALF_D = POOL.depth / 2
 
-/** Water depth (positive, metres) at a world Z coordinate. Floor slopes along Z. */
-export function waterDepthAt(z: number): number {
-  const t = clamp01((z + POOL_HALF_D) / POOL.depth)
-  return POOL.shallowDepth + (POOL.deepDepth - POOL.shallowDepth) * t
-}
-
-/** World Y of the pool floor at a given Z. */
-export function floorYAt(z: number): number {
-  return WATER_LEVEL - waterDepthAt(z)
-}
+/**
+ * The floor, the walls and where the water is now live in core/world, because
+ * there is more than one pool. `floorYAt`, `wetDepthAt` and `groundYAt` there
+ * take an X as well as a Z.
+ */
 
 /**
  * The island in the middle of the pool, and the lazy river that runs round it.

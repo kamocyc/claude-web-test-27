@@ -62,6 +62,17 @@ interface Probe {
   sprayHigh: number
   ridersOnSlide: number
   slideCompleted: number
+  /** Waves in each basin, so it is clear both pools are alive. */
+  riverPeak: number
+  calmPeak: number
+  /** Surface height sampled over the paving between the pools. */
+  dividePeak: number
+  /** People sitting on or lying on a float. */
+  ridersOnFloats: number
+  /** Largest squash on any inflatable, metres. */
+  deformation: number
+  /** Swimmers out of the water and on their feet. */
+  standing: number
   drawCalls: number
   /** Read back from the GPU height field, which nothing else here can see. */
   gpu: { peak: number; mean: number; nonFinite: number }
@@ -147,15 +158,49 @@ async function main(): Promise<number> {
             }
             return count > 0 ? total / count : 0
           })(),
+          riverPeak: (() => {
+            let peak = 0
+            for (let z = -4.5; z <= 4.5; z += 0.5) {
+              for (let x = -7.5; x <= 7.5; x += 0.5) {
+                if (app.water.isWetAt(x, z)) peak = Math.max(peak, Math.abs(app.water.heightAt(x, z)))
+              }
+            }
+            return peak
+          })(),
+          calmPeak: (() => {
+            let peak = 0
+            for (let z = -19.5; z <= -10.5; z += 0.5) {
+              for (let x = -7.5; x <= 7.5; x += 0.5) {
+                if (app.water.isWetAt(x, z)) peak = Math.max(peak, Math.abs(app.water.heightAt(x, z)))
+              }
+            }
+            return peak
+          })(),
+          dividePeak: (() => {
+            let peak = 0
+            for (let z = -9.5; z <= -5.5; z += 0.25) {
+              for (let x = -7.5; x <= 7.5; x += 0.5) {
+                peak = Math.max(peak, Math.abs(app.water.heightAt(x, z)))
+              }
+            }
+            return peak
+          })(),
+          ridersOnFloats: app.rider.riderCount,
+          deformation: Math.max(
+            0,
+            ...app.floats.map((f: { shell: { peak: number } | null }) => f.shell?.peak ?? 0),
+          ),
+          standing: app.swimmers.filter((s: { pose: string }) => s.pose === 'stand').length,
           intruders: (() => {
-            // Distance from the island's axis, which the channel is defined by:
-            // anything outside the ring is inside a wall it should not be in.
+            // Anything over dry land and below the top of it is inside a wall:
+            // sunk into the island, the filled corners, or the paving. Asking
+            // the wave field where the water is means this one check covers
+            // every piece of land in the place, in both pools.
             let bad = 0
-            for (const float of app.floats) {
-              const p = float.body.position
-              const dx = Math.max(0, Math.abs(p.x) - 2.6)
-              const distance = Math.hypot(dx, p.z)
-              if (distance < 1.15 || distance > 5.15) bad++
+            const bodies = [...app.floats, ...app.swimmers]
+            for (const object of bodies) {
+              const p = object.body.position
+              if (!app.water.isWetAt(p.x, p.z) && p.y < 0.24) bad++
             }
             return bad
           })(),
@@ -175,6 +220,8 @@ async function main(): Promise<number> {
           `cpuPeak=${probe.wavePeak.toFixed(4)}m  gpuPeak=${probe.gpu.peak.toFixed(4)}m  ` +
           `gpuMean=${probe.gpu.mean.toExponential(2)}m  spray=${probe.sprayCount}` +
           `(${probe.sprayHigh} high)  river=${probe.riverAlignment.toFixed(2)}  ` +
+          `riverWave=${probe.riverPeak.toFixed(4)}m  calmWave=${probe.calmPeak.toFixed(4)}m  ` +
+          `onFloats=${probe.ridersOnFloats}  squash=${(probe.deformation * 1000).toFixed(1)}mm  ` +
           `stuck=${probe.intruders}  draws=${probe.drawCalls}`,
       )
     }
@@ -190,6 +237,22 @@ async function main(): Promise<number> {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       () => (window as any).poolApp.slide.ridersOnSlide,
     )) as number
+
+    // Put the player on a float, and confirm the float notices.
+    const ridden = (await page.evaluate(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const app = (window as any).poolApp
+      const mounted = app.ridePlayerOnNearestFloat()
+      return { mounted, pose: app.player.pose }
+    })) as { mounted: boolean; pose: string }
+    await page.waitForTimeout(2500)
+    const rideSquash = (await page.evaluate(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const app = (window as any).poolApp
+      const float = app.rider.mountOf(app.player)
+      return float?.shell?.peak ?? 0
+    })) as number
+    await page.screenshot({ path: `${OUT_DIR}/pool-riding.png` })
 
     // Click the middle of the pool and confirm it actually disturbs the water.
     const beforeClick = await page.evaluate(
@@ -276,14 +339,37 @@ async function main(): Promise<number> {
         `mean alignment of floats with the current is ${last.riverAlignment.toFixed(2)}`,
       ],
       [
-        'nothing is stuck in the island or the corners',
+        'nothing is stuck inside the island, the corners or the paving',
         last.intruders === 0,
-        `${last.intruders} floats are inside a wall`,
+        `${last.intruders} bodies are below the top of dry land`,
       ],
       [
         'the fountains are throwing water',
         last.sprayHigh > 40,
         `${last.sprayHigh} droplets above 0.6m`,
+      ],
+      [
+        'both pools have water in them',
+        last.riverPeak > 1e-3 && last.calmPeak > 1e-3,
+        `river ${last.riverPeak.toExponential(2)}m, calm pool ${last.calmPeak.toExponential(2)}m`,
+      ],
+      // The walkway between them is land. Any height there means the mask has
+      // stopped separating the two basins.
+      [
+        'the walkway between them is dry',
+        last.dividePeak < Math.max(last.riverPeak, last.calmPeak) * 0.05,
+        `divide ${last.dividePeak.toExponential(2)}m against ` +
+          `${Math.max(last.riverPeak, last.calmPeak).toExponential(2)}m in the pools`,
+      ],
+      [
+        'the player can get on a float',
+        ridden.mounted && (ridden.pose === 'sit' || ridden.pose === 'ride'),
+        `mounted=${ridden.mounted} pose=${ridden.pose}`,
+      ],
+      [
+        'a rider squashes what they are sitting on',
+        rideSquash > 3e-3,
+        `${(rideSquash * 1000).toFixed(2)}mm of squash under the player`,
       ],
       [
         'the slide takes riders',

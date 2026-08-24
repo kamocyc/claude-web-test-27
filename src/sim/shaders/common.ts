@@ -64,22 +64,28 @@ float ggxSpecular(vec3 normal, vec3 viewDir, vec3 lightDir, float roughness) {
 `
 
 /**
- * Wave-speed weight for one row of the field.
+ * Wave-speed weight for one texel of the field.
  *
- * Mirrors WaveFieldCPU.updateRowK, including the 0.24 cap: the two fields must
+ * Mirrors WaveFieldCPU.updateCellK, including the 0.24 cap: the two fields must
  * agree on how fast waves travel, or the ripples you see and the forces bodies
- * feel would drift apart.
+ * feel would drift apart. The depth comes from the bathymetry texture rather
+ * than a formula, because there is more than one basin now and they do not
+ * share a floor.
  */
 export const WAVE_SPEED_GLSL = /* glsl */ `
-uniform float uShallowDepth;
-uniform float uDeepDepth;
+uniform sampler2D uBathymetry;
 uniform float uSpeedScale;
 uniform float uDt;
 uniform float uCellSize;
 
-float stencilWeight(float v) {
-  float depth = max(uShallowDepth + (uDeepDepth - uShallowDepth) * v, 0.05);
-  float speed = uSpeedScale * sqrt(9.81 * depth);
+/** R = water depth in metres, G = 1 where there is water. */
+vec2 bathymetryAt(vec2 uv) {
+  return texture2D(uBathymetry, uv).rg;
+}
+
+float stencilWeight(float depth) {
+  if (depth <= 0.0) return 0.0;
+  float speed = uSpeedScale * sqrt(9.81 * max(depth, 0.05));
   float courant = speed * uDt / uCellSize;
   return min(0.24, courant * courant);
 }
