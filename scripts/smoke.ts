@@ -55,6 +55,13 @@ interface Probe {
   sprayCount: number
   swimmerSpeeds: number[]
   floatDrafts: number[]
+  /** Mean alignment of the floats' motion with the river, -1..1. */
+  riverAlignment: number
+  /** Floats sunk into the island or the corner fill. */
+  intruders: number
+  sprayHigh: number
+  ridersOnSlide: number
+  slideCompleted: number
   drawCalls: number
   /** Read back from the GPU height field, which nothing else here can see. */
   gpu: { peak: number; mean: number; nonFinite: number }
@@ -123,6 +130,38 @@ async function main(): Promise<number> {
           sprayCount: app.spray.activeCount,
           swimmerSpeeds: app.swimmers.map((s: { speed: number }) => s.speed),
           floatDrafts: app.floats.map((f: { body: { position: { y: number } } }) => f.body.position.y),
+          riverAlignment: (() => {
+            // How much of each float's motion is going the way the river runs.
+            const out = { x: 0, z: 0 }
+            let total = 0
+            let count = 0
+            for (const float of app.floats) {
+              const p = float.body.position
+              const v = float.body.velocity
+              app.flow.velocityAt(p.x, p.z, out)
+              const flowSpeed = Math.hypot(out.x, out.z)
+              const speed = Math.hypot(v.x, v.z)
+              if (flowSpeed < 0.05 || speed < 0.02) continue
+              total += (v.x * out.x + v.z * out.z) / (flowSpeed * speed)
+              count++
+            }
+            return count > 0 ? total / count : 0
+          })(),
+          intruders: (() => {
+            // Distance from the island's axis, which the channel is defined by:
+            // anything outside the ring is inside a wall it should not be in.
+            let bad = 0
+            for (const float of app.floats) {
+              const p = float.body.position
+              const dx = Math.max(0, Math.abs(p.x) - 2.6)
+              const distance = Math.hypot(dx, p.z)
+              if (distance < 1.15 || distance > 5.15) bad++
+            }
+            return bad
+          })(),
+          sprayHigh: app.spray.countAbove(0.6),
+          ridersOnSlide: app.slide.ridersOnSlide,
+          slideCompleted: app.slide.completed,
           drawCalls: app.renderer.info.render.calls,
           gpu: app.waves.sampleStats(app.renderer),
           gpuHighPrecision: app.waves.highPrecision,
@@ -134,10 +173,23 @@ async function main(): Promise<number> {
       console.log(
         `t=${at}s  simTime=${probe.elapsed.toFixed(2)}s  steps/frame=${probe.steps}  ` +
           `cpuPeak=${probe.wavePeak.toFixed(4)}m  gpuPeak=${probe.gpu.peak.toFixed(4)}m  ` +
-          `gpuMean=${probe.gpu.mean.toExponential(2)}m  spray=${probe.sprayCount}  ` +
-          `draws=${probe.drawCalls}`,
+          `gpuMean=${probe.gpu.mean.toExponential(2)}m  spray=${probe.sprayCount}` +
+          `(${probe.sprayHigh} high)  river=${probe.riverAlignment.toFixed(2)}  ` +
+          `stuck=${probe.intruders}  draws=${probe.drawCalls}`,
       )
     }
+
+    // Put someone on the steps, then let the run carry on: the climb and the
+    // ride take a while in simulated time, and under software rendering that
+    // runs a good deal slower than the wall clock.
+    await page.evaluate(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(window as any).poolApp.sendDownTheSlide()
+    })
+    const ridingAfterSend = (await page.evaluate(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      () => (window as any).poolApp.slide.ridersOnSlide,
+    )) as number
 
     // Click the middle of the pool and confirm it actually disturbs the water.
     const beforeClick = await page.evaluate(
@@ -217,6 +269,26 @@ async function main(): Promise<number> {
         'swimmers keep the water moving',
         last.waveEnergy > 0.5 && last.wavePeak > 3e-3,
         `energy ${last.waveEnergy.toFixed(3)}, peak ${last.wavePeak.toExponential(2)}`,
+      ],
+      [
+        'the river is going round',
+        last.riverAlignment > 0.35,
+        `mean alignment of floats with the current is ${last.riverAlignment.toFixed(2)}`,
+      ],
+      [
+        'nothing is stuck in the island or the corners',
+        last.intruders === 0,
+        `${last.intruders} floats are inside a wall`,
+      ],
+      [
+        'the fountains are throwing water',
+        last.sprayHigh > 40,
+        `${last.sprayHigh} droplets above 0.6m`,
+      ],
+      [
+        'the slide takes riders',
+        ridingAfterSend >= 1,
+        `${ridingAfterSend} riders on the slide after sending one`,
       ],
       [
         'clicking splashes',

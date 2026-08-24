@@ -1,7 +1,18 @@
 import { Vector3 } from 'three'
 import { describe, expect, it } from 'vitest'
-import { POOL_HALF_D, POOL_HALF_W, floorYAt } from '../src/core/config'
-import { collidePair, collideWithPool } from '../src/physics/Collide'
+import {
+  ISLAND,
+  ISLAND_TOP,
+  POOL,
+  POOL_HALF_D,
+  POOL_HALF_W,
+  RIVER,
+  RIVER_BANK,
+  WATER_LEVEL,
+  floorYAt,
+} from '../src/core/config'
+import { stadiumDistance, type Vec2 } from '../src/core/shapes'
+import { collideInsideStadium, collidePair, collideWithPool, collideWithStadium } from '../src/physics/Collide'
 import { RigidBody } from '../src/physics/RigidBody'
 
 function ball(radius: number, mass: number) {
@@ -158,5 +169,72 @@ describe('collideWithPool', () => {
     collideWithPool(body)
     expect(body.velocity.length()).toBe(0)
     expect(body.position.y).toBeCloseTo(-0.4, 12)
+  })
+})
+
+const _outward: Vec2 = { x: 0, z: 0 }
+
+describe('the island and the river bank', () => {
+  it('pushes a float that has been driven into the island wall back out', () => {
+    // The case that happens: something in the channel shoved against the side.
+    // A body buried much deeper than this is closer to the top than to the
+    // wall, and the contact takes it out that way instead — which is the right
+    // answer for a solid block, and why the test is at the wall.
+    const body = ball(0.3, 5)
+    body.position.set(0.5, -0.05, 1)
+    body.syncDerived()
+    for (let i = 0; i < 60; i++) collideWithStadium(body, ISLAND, ISLAND_TOP)
+
+    const distance = stadiumDistance(ISLAND, body.position.x, body.position.z, _outward)
+    expect(distance).toBeGreaterThan(ISLAND.radius + 0.3 - 1e-2)
+    // Out through the wall, not up over the top.
+    expect(body.position.y).toBeLessThan(0.1)
+  })
+
+  it('holds a body up on top of the island rather than through it', () => {
+    const body = ball(0.25, 5)
+    body.position.set(0, ISLAND_TOP + 0.1, 0)
+    body.syncDerived()
+    for (let i = 0; i < 80; i++) collideWithStadium(body, ISLAND, ISLAND_TOP)
+
+    expect(body.position.y).toBeGreaterThan(ISLAND_TOP + 0.2)
+    // And it stayed where it was, instead of being shoved off the side.
+    expect(Math.hypot(body.position.x, body.position.z)).toBeLessThan(0.2)
+  })
+
+  it('keeps a body inside the outer bank', () => {
+    const body = ball(0.3, 5)
+    // Out in what is now the filled-in corner of the pool.
+    body.position.set(6.4, -0.3, 4.4)
+    body.syncDerived()
+    for (let i = 0; i < 60; i++) collideInsideStadium(body, RIVER_BANK, ISLAND_TOP)
+
+    const distance = stadiumDistance(RIVER_BANK, body.position.x, body.position.z, _outward)
+    expect(distance).toBeLessThan(RIVER.outerRadius - 0.3 + 1e-2)
+  })
+})
+
+describe('the pool shell above the water line', () => {
+  it('lands a body that left the pool on the deck', () => {
+    // The flume passes over the deck, so anyone who goes over its side has to
+    // have something to land on. Before the walls were given a height they
+    // would have been dragged sideways back into the pool from any altitude.
+    const body = ball(0.25, 5)
+    body.position.set(POOL_HALF_W + 2.5, WATER_LEVEL + POOL.copingHeight - 0.4, 2)
+    body.syncDerived()
+    for (let i = 0; i < 80; i++) collideWithPool(body)
+
+    expect(body.position.y).toBeGreaterThan(WATER_LEVEL + POOL.copingHeight)
+    expect(body.position.x).toBeGreaterThan(POOL_HALF_W + 2)
+  })
+
+  it('does not touch a body flying over the pool well above the coping', () => {
+    const body = ball(0.25, 5)
+    body.position.set(POOL_HALF_W - 0.1, 2.5, 0)
+    body.syncDerived()
+    for (let i = 0; i < 40; i++) collideWithPool(body)
+
+    expect(body.position.x).toBeCloseTo(POOL_HALF_W - 0.1, 9)
+    expect(body.velocity.length()).toBe(0)
   })
 })

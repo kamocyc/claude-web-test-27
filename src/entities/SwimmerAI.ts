@@ -1,14 +1,19 @@
 import { Vector3 } from 'three'
-import { POOL_HALF_D, POOL_HALF_W } from '../core/config'
+import { ISLAND, POOL_HALF_D, POOL_HALF_W } from '../core/config'
+import { stadiumDistance, type Vec2 } from '../core/shapes'
 import type { PhysicsContext } from '../physics/PhysicsWorld'
 import type { Swimmer } from './Swimmer'
 
 const WALL_MARGIN = 1.4
 const ARRIVAL_RADIUS = 1.1
+/** How far clear of the island wall a target is allowed to be picked. */
+const ISLAND_MARGIN = 0.9
 
 const _toTarget = new Vector3()
 const _steer = new Vector3()
 const _separation = new Vector3()
+const _outward: Vec2 = { x: 0, z: 0 }
+const _flow: Vec2 = { x: 0, z: 0 }
 
 /**
  * Steering for the swimmers nobody is driving.
@@ -17,11 +22,18 @@ const _separation = new Vector3()
  * directly. Everything else (getting shoved by a wave, drifting on the current,
  * bumping into a ring) still comes from the physics, so an AI swimmer and the
  * player behave identically once you stop pressing keys.
+ *
+ * There are two moods: crossing the pool towards a point, and going round with
+ * the lazy river. The second one is not a path — it steers along whatever the
+ * flow field says underneath them — so a swimmer riding the circuit and a
+ * beach ball drifting on it follow the same water.
  */
 export class SwimmerAI {
   private readonly target = new Vector3()
   private restTimer = 0
   private repathTimer = 0
+  /** Seconds left of going round with the current instead of crossing. */
+  private ridingTimer = 0
 
   constructor(
     readonly swimmer: Swimmer,
@@ -31,15 +43,24 @@ export class SwimmerAI {
   }
 
   private pickTarget(): void {
-    this.target.set(
-      (Math.random() * 2 - 1) * (POOL_HALF_W - WALL_MARGIN),
-      0,
-      (Math.random() * 2 - 1) * (POOL_HALF_D - WALL_MARGIN),
-    )
+    // Retry rather than project: projecting every rejected point onto the
+    // island's outline would cluster targets against its wall.
+    for (let attempt = 0; attempt < 12; attempt++) {
+      this.target.set(
+        (Math.random() * 2 - 1) * (POOL_HALF_W - WALL_MARGIN),
+        0,
+        (Math.random() * 2 - 1) * (POOL_HALF_D - WALL_MARGIN),
+      )
+      const distance = stadiumDistance(ISLAND, this.target.x, this.target.z, _outward)
+      if (distance > ISLAND.radius + ISLAND_MARGIN) break
+    }
     this.repathTimer = 8 + Math.random() * 10
+
+    // Every so often, stop going anywhere in particular and just go round.
+    if (Math.random() < 0.4) this.ridingTimer = 20 + Math.random() * 25
   }
 
-  update(dt: number, _context: PhysicsContext): void {
+  update(dt: number, context: PhysicsContext): void {
     const swimmer = this.swimmer
     const position = swimmer.body.position
 
@@ -63,7 +84,27 @@ export class SwimmerAI {
       return
     }
 
-    _steer.copy(_toTarget).normalize()
+    // Riding the circuit: follow the water rather than a destination. Falls
+    // back to the target whenever the local current is too weak to read, so a
+    // swimmer who drifts out of the channel finds their way back.
+    this.ridingTimer -= dt
+    let riding = false
+    if (this.ridingTimer > 0) {
+      context.flow.velocityAt(position.x, position.z, _flow)
+      if (Math.hypot(_flow.x, _flow.z) > 0.12) {
+        _steer.set(_flow.x, 0, _flow.z).normalize()
+        riding = true
+      }
+    }
+    if (!riding) _steer.copy(_toTarget).normalize()
+
+    // Keep off the island, the same way as off the walls.
+    const islandDistance = stadiumDistance(ISLAND, position.x, position.z, _outward)
+    const intrusion = ISLAND.radius + ISLAND_MARGIN - islandDistance
+    if (intrusion > 0) {
+      _steer.x += _outward.x * intrusion * 2.2
+      _steer.z += _outward.z * intrusion * 2.2
+    }
 
     // Push away from the walls before reaching them, so nobody swims into tile.
     const wallPushX = softWall(position.x, POOL_HALF_W)
@@ -92,7 +133,7 @@ export class SwimmerAI {
 
     swimmer.desiredHeading = Math.atan2(_steer.x, _steer.z)
     // Ease off when close, so they glide in rather than ramming the wall.
-    swimmer.throttle = Math.min(1, 0.45 + Math.min(distance / 4, 1) * 0.5)
+    swimmer.throttle = riding ? 0.4 : Math.min(1, 0.45 + Math.min(distance / 4, 1) * 0.5)
     swimmer.pitchInput = 0
   }
 }

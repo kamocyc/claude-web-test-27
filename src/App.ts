@@ -9,27 +9,35 @@ import {
   type WebGLRenderer,
 } from 'three'
 import {
+  ISLAND,
+  ISLAND_TOP,
   MAX_STEPS_PER_FRAME,
   PHYSICS_DT,
   POOL,
   POOL_HALF_D,
   POOL_HALF_W,
+  RIVER,
+  RIVER_BANK,
   WATER_LEVEL,
   WAVE_DT,
   WAVE_SUBSTEPS,
 } from './core/config'
+import { clampToRing, type Vec2 } from './core/shapes'
 import { Environment } from './core/Environment'
 import { FollowCamera } from './core/FollowCamera'
 import { Input } from './core/Input'
 import { attachResize, createRenderer } from './core/Renderer'
+import { Fountain } from './entities/Fountain'
 import { AirMattress, BeachBall } from './entities/PoolFloat'
 import { Pool } from './entities/Pool'
 import { RubberDuck } from './entities/RubberDuck'
 import { SwimRing } from './entities/SwimRing'
 import { Swimmer } from './entities/Swimmer'
 import { SwimmerAI } from './entities/SwimmerAI'
+import { WaterSlide } from './entities/WaterSlide'
 import type { FloatingObject } from './entities/FloatingObject'
 import { PhysicsWorld } from './physics/PhysicsWorld'
+import { StadiumBank, StadiumObstacle } from './physics/StadiumObstacle'
 import { CausticsProjector } from './render/CausticsProjector'
 import { SprayParticles } from './render/SprayParticles'
 import { WaterSurface } from './render/WaterSurface'
@@ -75,9 +83,11 @@ export class App {
   readonly splats = new SplatQueue()
   readonly physics: PhysicsWorld
   readonly surface: WaterSurface
-  readonly spray = new SprayParticles({ capacity: 4200 })
+  readonly spray = new SprayParticles({ capacity: 5600 })
   readonly caustics: CausticsProjector
   readonly pool: Pool
+  readonly slide: WaterSlide
+  readonly fountains: Fountain[] = []
   readonly input: Input
   readonly follow: FollowCamera
 
@@ -144,17 +154,25 @@ export class App {
     this.physics.splash = this.spray
 
     this.buildCurrent()
+    this.physics.addFeature(new StadiumObstacle(ISLAND, ISLAND_TOP))
+    this.physics.addFeature(new StadiumBank(RIVER_BANK, WATER_LEVEL + POOL.copingHeight))
 
-    this.player = this.addSwimmer(0, -3.5, 1.5, true)
+    this.slide = this.physics.addFeature(new WaterSlide())
+    this.scene.add(this.slide.object)
+    this.buildFountains()
+
+    this.player = this.addSwimmer(0, 0, -3.6, true)
     for (let i = 0; i < 4; i++) {
-      const swimmer = this.addSwimmer(
-        i + 1,
+      const spot = inChannel(
         (Math.random() * 2 - 1) * (POOL_HALF_W - 2),
         (Math.random() * 2 - 1) * (POOL_HALF_D - 2),
-        false,
       )
+      const swimmer = this.addSwimmer(i + 1, spot.x, spot.z, false)
       this.ai.push(new SwimmerAI(swimmer, this.swimmers))
     }
+    // The player boards whenever they steer into the circle; the AI only some
+    // of the time, so there is still a pool full of people.
+    for (const swimmer of this.swimmers) this.slide.watch(swimmer, swimmer === this.player)
 
     this.spawnFloats()
 
@@ -171,27 +189,60 @@ export class App {
     this.waves.reset(this.renderer)
   }
 
-  /** Wall inlets and the two slow eddies they set up in the corners. */
+  /**
+   * The lazy river, and the wall inlets that drive it.
+   *
+   * The pair of counter-rotating eddies this used to have are gone: they sat
+   * either side of the island and turned against the circuit, so whichever was
+   * stronger won and nothing went round.
+   */
   private buildCurrent(): void {
+    this.flow.addChannel({
+      x: ISLAND.x,
+      z: ISLAND.z,
+      halfLength: ISLAND.halfLength,
+      radius: ISLAND.radius,
+      innerRadius: RIVER.innerRadius,
+      outerRadius: RIVER.outerRadius,
+      strength: RIVER.speed,
+    })
+
+    // Inlets in the long walls, each aimed the way the circuit already runs on
+    // its own side of the island: +X below the axis, -X above it.
     this.flow.addJet({
       x: -POOL_HALF_W + 0.15,
-      z: -2.6,
+      z: -3.4,
       dirX: 1,
-      dirZ: 0.22,
-      strength: 0.72,
-      radius: 4.5,
+      dirZ: 0,
+      strength: 0.4,
+      radius: 4,
     })
     this.flow.addJet({
       x: POOL_HALF_W - 0.15,
-      z: 2.6,
+      z: 3.4,
       dirX: -1,
-      dirZ: -0.22,
-      strength: 0.72,
-      radius: 4.5,
+      dirZ: 0,
+      strength: 0.4,
+      radius: 4,
     })
-    this.flow.addVortex({ x: -3.4, z: 2.2, strength: 0.34, coreRadius: 1.9 })
-    this.flow.addVortex({ x: 3.4, z: -2.2, strength: -0.34, coreRadius: 1.9 })
     this.waves.markFlowDirty()
+  }
+
+  /**
+   * Three jets standing in the channel, spread round it so the current always
+   * has one to carry the ripples away from.
+   */
+  private buildFountains(): void {
+    const places: [number, number, number][] = [
+      [-5.2, 0, 0],
+      [5.2, 0, 2.6],
+      [0, -3.2, 5.1],
+    ]
+    for (const [x, z, phase] of places) {
+      const fountain = this.physics.addFeature(new Fountain({ x, z, phase }))
+      this.scene.add(fountain.object)
+      this.fountains.push(fountain)
+    }
   }
 
   private addSwimmer(palette: number, x: number, z: number, isPlayer: boolean): Swimmer {
@@ -206,7 +257,8 @@ export class App {
 
   private spawnFloats(): void {
     const add = (object: FloatingObject, x: number, z: number) => {
-      object.placeAt(x, z, WATER_LEVEL + 0.08)
+      const spot = inChannel(x, z, 0.6)
+      object.placeAt(spot.x, spot.z, WATER_LEVEL + 0.08)
       this.scene.add(object.object)
       this.physics.add(object)
       this.floats.push(object)
@@ -220,14 +272,16 @@ export class App {
     add(new RubberDuck(), -1.6, 3.4)
     add(new AirMattress('#4fd1c5'), 4.6, -0.6)
     add(new AirMattress('#f7b267'), -6.4, 3.4)
-    add(new BeachBall(), 1.2, 1.1)
+    add(new BeachBall(), 1.2, 2.7)
     add(new BeachBall(), 6.6, -3.4)
   }
 
   /** Add another floating object at a random spot, for the GUI's spawn buttons. */
   spawn(kind: 'ring' | 'duck' | 'mattress' | 'ball'): void {
-    const x = (Math.random() * 2 - 1) * (POOL_HALF_W - 1.5)
-    const z = (Math.random() * 2 - 1) * (POOL_HALF_D - 1.5)
+    const { x, z } = inChannel(
+      (Math.random() * 2 - 1) * (POOL_HALF_W - 1.5),
+      (Math.random() * 2 - 1) * (POOL_HALF_D - 1.5),
+    )
     const object =
       kind === 'ring'
         ? new SwimRing(Math.floor(Math.random() * 4))
@@ -241,6 +295,17 @@ export class App {
     this.scene.add(object.object)
     this.physics.add(object)
     this.floats.push(object)
+  }
+
+  /**
+   * Send someone down the slide now. Picks whoever is not already on it,
+   * preferring an AI so the camera does not get yanked away from the player.
+   */
+  sendDownTheSlide(): void {
+    const candidate =
+      this.swimmers.find((swimmer) => swimmer !== this.player && !this.slide.isRiding(swimmer)) ??
+      this.swimmers.find((swimmer) => !this.slide.isRiding(swimmer))
+    if (candidate) this.slide.send(candidate)
   }
 
   /** Remove every float that was not part of the initial set-up. */
@@ -406,6 +471,8 @@ export class App {
   }
 
   dispose(): void {
+    this.slide.dispose()
+    for (const fountain of this.fountains) fountain.dispose()
     this.detachResize()
     this.input.dispose()
     this.surface.dispose()
@@ -420,3 +487,17 @@ export class App {
 }
 
 const UP = new Vector3(0, 1, 0)
+
+/** Put a spawn point in the channel: clear of the island, inside the bank. */
+function inChannel(x: number, z: number, margin = 0.8): Vec2 {
+  return clampToRing(
+    RIVER_BANK,
+    x,
+    z,
+    ISLAND.radius + margin,
+    RIVER.outerRadius - margin,
+    _spawn,
+  )
+}
+
+const _spawn: Vec2 = { x: 0, z: 0 }

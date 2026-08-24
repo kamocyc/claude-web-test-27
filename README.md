@@ -3,10 +3,14 @@
 A swimming pool in the browser, built around one idea: everything in the water
 interacts with the water, and the water interacts back.
 
+A lazy river runs a full circuit round an island in the middle, a water slide
+drops riders into it, and three fountains stand in the channel throwing water
+that lands as real ripples.
+
 Three.js + TypeScript, no binary assets — every model, texture and the sky
 itself is generated in code.
 
-![the pool](artifacts/pool-9s.png)
+![the pool](docs/screenshot.png)
 
 ## Running it
 
@@ -38,8 +42,12 @@ automatic quality guess.
 | click the water | splash |
 
 The panel on the right exposes the wave speed and damping, the water's colour
-and absorption, foam and caustics, the strength of each jet and eddy, the time
-of day, and buttons to drop more things in.
+and absorption, foam and caustics, the strength of the river and each jet, the
+fountains, the time of day, a button to send someone down the slide, and buttons
+to drop more things in.
+
+Swim into the boarding circle at the foot of the slide's steps and you will
+climb out and take the slide yourself.
 
 ## What makes it interact
 
@@ -61,10 +69,31 @@ current, and are shoved around by a swim ring exactly the way a float is. The
 player and the AI swimmers run the same code; the AI just sets a heading and a
 throttle.
 
+**The furniture is physics too.** The island, the flume and the fountains are
+`WorldFeature`s: they can add forces to a body and resolve contacts with it, and
+that is all any of them do. The slide has no rail — riders are ordinary rigid
+bodies falling down the inside of a pipe, so they gather speed on the steep
+section, ride up the outside of the bend, and go over the side if they carry too
+much speed into it, because the pipe is only closed for 300 degrees and there is
+nothing above them. The fountains push with the jet's own momentum flux, which
+is why the same nozzle throws a beach ball over the deck and does nothing at all
+to a swimmer.
+
 **Buoyancy is per-sphere.** A body is a set of spheres, and each one gets its own
 surface height, its own submerged cap and its own drag, applied at its own
 position. Restoring torque, list under an off-centre load and a swim ring
 slapping flat again after you tip it all emerge from that.
+
+## The pool itself
+
+The basin is a stadium: a rectangle with its corners filled in to a curve
+concentric with the island, so the water is a channel of even width all the way
+round. That shape is not decoration. The current is tangential to the island
+everywhere and divergence-free, so it transports water without ever piling it
+up — but with the corners left open it has to fade out before the walls, and
+anything carried through a bend coasts out of the stream and parks in the dead
+water for the rest of the session. With both banks in place a float goes round,
+and keeps going round. `tests/lazyRiver.test.ts` fails if it does not.
 
 ## What makes it look like water
 
@@ -84,10 +113,11 @@ slapping flat again after you tip it all emerge from that.
 
 ```
 src/
-  core/       renderer, camera, sky and lighting, input, constants
+  core/       renderer, camera, sky and lighting, input, constants, shapes
   sim/        the water: GPU and CPU height fields, flow, foam, shaders
   physics/    rigid bodies, buoyancy, collision, the fixed-step world
-  entities/   pool, swim rings, ducks, floats, swimmers and their AI
+  entities/   pool and island, water slide, fountains, swim rings, ducks,
+              floats, swimmers and their AI
   render/     water surface, planar reflection, caustics, spray, textures
   ui/         debug GUI
 tests/        unit tests for the pure-logic layer
@@ -115,7 +145,21 @@ visibly stirs the surface, leaves a wake behind them, that a ripple crosses the
 pool rather than dying where it started, and that the water settles again once
 they stop.
 
+The river, the slide and the fountains get the same treatment. `tests/lazyRiver.test.ts` checks
+the current is tangential, closed and divergence-free, and then — separately,
+because it is a different claim — that a ring, a ball and a mattress dropped in
+it each complete a lap of the island. `tests/waterSlide.test.ts` checks the
+things a rail would have made true for free: that gravity alone takes a body
+down, that nothing comes out faster than the drop allows, that a body longer
+than the flume is wide does not wedge across it, and that a rider is never left
+stranded halfway. `tests/fountain.test.ts` checks the jet is a plausible one
+(bore, flow and column height), that it throws a beach ball clear of the water
+while barely moving a swimmer, that it rings the surface with waves purely
+through the droplets it throws, and that a minute of it does not raise the pool.
+
 `npm run smoke` covers the parts that need a GPU: it drives the real page in
 headless Chromium and asserts the loop is turning, the field is finite and
-bounded, swimmers are moving, floats are at plausible waterlines, clicking
-disturbs the water, and no shader failed to compile.
+bounded, swimmers are moving, floats are at plausible waterlines, the floats are
+drifting the way the river runs, nothing is stuck inside a wall, the fountains
+have water in the air, the slide takes a rider, clicking disturbs the water, and
+no shader failed to compile.

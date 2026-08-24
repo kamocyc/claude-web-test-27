@@ -186,10 +186,27 @@ slower than the ones moving the floats. The slider stops short of that.
 ## Flow and foam
 
 `FlowField` is analytic — directed jets with a distance falloff and a forward
-cone, plus Rankine vortices — evaluated on demand. It is baked to a small RG
-texture each time it changes, which the foam advection and the water's detail
-normals both read, so drifting foam, drifting floats and the drifting surface
-texture all agree.
+cone, Rankine vortices, and the lazy river's channel — evaluated on demand. It
+is baked to a small RG texture each time it changes, which the foam advection
+and the water's detail normals both read, so drifting foam, drifting floats and
+the drifting surface texture all agree.
+
+The channel is the one worth explaining. Its velocity is tangential to the
+island's outline everywhere, with a magnitude that depends only on the distance
+from the island's axis. Written that way it is divergence-free by construction:
+along the straight sides the speed does not vary with x and there is no
+cross-channel component, and round the ends the flow is purely azimuthal. That
+matters because the current drags on every floating body, and a source or a sink
+hidden in it would show up as the water level walking away over a long
+session — the exact failure `waterLevel` exists to catch. Being able to make the
+river as strong as it needs to be without touching the level rests on it.
+
+The two banks are deliberately not symmetric. The profile ramps up over a
+quarter of the channel's width at the island and falls off over an eighth of it
+at the outer wall, because a float carried through a bend ends up pressed
+against the outer bank: with a symmetric profile it would be sitting in still
+water and would stop there for good. `tests/lazyRiver.test.ts` measures the
+speed against that bank for exactly this reason.
 
 `FoamField` advects that foam semi-Lagrangian along the current, decays it, and
 deposits more wherever the surface is churning (read straight off the two stored

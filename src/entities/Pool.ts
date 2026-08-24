@@ -4,6 +4,7 @@ import {
   ConeGeometry,
   CylinderGeometry,
   DoubleSide,
+  ExtrudeGeometry,
   Group,
   Mesh,
   MeshStandardMaterial,
@@ -11,10 +12,23 @@ import {
   PlaneGeometry,
   Shape,
   ShapeGeometry,
+  SphereGeometry,
   TorusGeometry,
+  Vector2,
   Vector3,
 } from 'three'
-import { POOL, POOL_HALF_D, POOL_HALF_W, WATER_LEVEL, floorYAt } from '../core/config'
+import {
+  ISLAND,
+  ISLAND_TOP,
+  POOL,
+  RIVER,
+  RIVER_BANK,
+  POOL_HALF_D,
+  POOL_HALF_W,
+  WATER_LEVEL,
+  floorYAt,
+} from '../core/config'
+import { clampToRing, type Stadium, type Vec2 } from '../core/shapes'
 import type { CausticsProjector } from '../render/CausticsProjector'
 import { makeDeckTexture, makeTileTexture } from '../render/textures'
 
@@ -62,7 +76,9 @@ export class Pool {
     this.group.add(this.buildFloor())
     for (const wall of this.buildWalls()) this.group.add(wall)
     this.group.add(this.buildDeck())
+    this.group.add(this.buildCornerFill())
     this.group.add(this.buildCoping())
+    this.group.add(this.buildIsland())
     this.group.add(this.buildLadder())
     this.group.add(this.buildSurroundings())
 
@@ -159,31 +175,118 @@ export class Pool {
   /** A pale lip around the water's edge, so the tiles do not meet the deck raw. */
   private buildCoping(): Mesh {
     const lip = 0.34
-    const shape = new Shape()
-    shape.moveTo(-POOL_HALF_W - lip, -POOL_HALF_D - lip)
-    shape.lineTo(POOL_HALF_W + lip, -POOL_HALF_D - lip)
-    shape.lineTo(POOL_HALF_W + lip, POOL_HALF_D + lip)
-    shape.lineTo(-POOL_HALF_W - lip, POOL_HALF_D + lip)
-    shape.closePath()
-
+    const shape = new Shape(stadiumOutline({ ...RIVER_BANK, radius: RIVER_BANK.radius + lip }, 20))
     const hole = new Path()
-    hole.moveTo(-POOL_HALF_W, -POOL_HALF_D)
-    hole.lineTo(-POOL_HALF_W, POOL_HALF_D)
-    hole.lineTo(POOL_HALF_W, POOL_HALF_D)
-    hole.lineTo(POOL_HALF_W, -POOL_HALF_D)
-    hole.closePath()
+    hole.setFromPoints(stadiumOutline(RIVER_BANK, 20))
     shape.holes.push(hole)
 
-    const geometry = new ShapeGeometry(shape)
+    const geometry = new ShapeGeometry(shape, 4)
     geometry.rotateX(-Math.PI / 2)
-    geometry.translate(0, WATER_LEVEL + POOL.copingHeight + 0.004, 0)
+    geometry.translate(RIVER_BANK.x, WATER_LEVEL + POOL.copingHeight + 0.004, RIVER_BANK.z)
 
     const mesh = new Mesh(geometry, this.copingMaterial)
     mesh.receiveShadow = true
     return mesh
   }
 
-  /** Stainless ladder at the deep end. */
+  /**
+   * The pool's corners, filled in to the river's outer bank.
+   *
+   * This is what turns the basin into an even channel: the water that is left
+   * is the ring between the island and this wall, of the same width all the way
+   * round. Leave the corners open and the current has to fade out before
+   * reaching them — anything carried round a bend then coasts out of the
+   * stream and sits in the dead water for the rest of the session.
+   */
+  private buildCornerFill(): Mesh {
+    const top = WATER_LEVEL + POOL.copingHeight
+    const bottom = floorYAt(POOL_HALF_D) - 0.05
+
+    const shape = new Shape()
+    shape.moveTo(-POOL_HALF_W, -POOL_HALF_D)
+    shape.lineTo(POOL_HALF_W, -POOL_HALF_D)
+    shape.lineTo(POOL_HALF_W, POOL_HALF_D)
+    shape.lineTo(-POOL_HALF_W, POOL_HALF_D)
+    shape.closePath()
+
+    const hole = new Path()
+    hole.setFromPoints(stadiumOutline(RIVER_BANK, 20))
+    shape.holes.push(hole)
+
+    const geometry = new ExtrudeGeometry(shape, {
+      depth: top - bottom,
+      bevelEnabled: false,
+      curveSegments: 4,
+    })
+    geometry.rotateX(-Math.PI / 2)
+    geometry.translate(0, bottom, 0)
+
+    // Group 0 is the caps — the top one is deck level — and group 1 the walls,
+    // which are underwater and want the same tiles as the rest of the shell.
+    const mesh = new Mesh(geometry, [this.deckMaterial, this.interiorMaterial])
+    mesh.receiveShadow = true
+    mesh.name = 'corner-fill'
+    return mesh
+  }
+
+  /**
+   * The island the lazy river runs round.
+   *
+   * Its wall is the same tiled interior as the pool shell — it is a wall of the
+   * same basin — so it picks up caustics for free. The top is level with the
+   * deck, which is what lets someone thrown up onto it stand there rather than
+   * fall into a gap.
+   */
+  private buildIsland(): Group {
+    const group = new Group()
+    const bottom = floorYAt(ISLAND.z + ISLAND.radius) - 0.05
+    const height = ISLAND_TOP - bottom
+
+    const geometry = new ExtrudeGeometry(new Shape(stadiumOutline(ISLAND, 16)), {
+      depth: height,
+      bevelEnabled: false,
+      curveSegments: 4,
+    })
+    // The profile is drawn in XY and extruded along +Z; turn it so the
+    // extrusion runs up the world's Y instead.
+    geometry.rotateX(-Math.PI / 2)
+    geometry.translate(ISLAND.x, bottom, ISLAND.z)
+
+    // Group 0 is the caps, group 1 the side wall.
+    const mesh = new Mesh(geometry, [this.copingMaterial, this.interiorMaterial])
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    mesh.name = 'island'
+    group.add(mesh)
+
+    // Something growing on it, so it reads as an island rather than a block.
+    const foliage = new MeshStandardMaterial({ color: '#4a7b42', roughness: 0.95 })
+    const trunkMaterial = new MeshStandardMaterial({ color: '#7d6748', roughness: 0.85 })
+    for (const [x, z, scale] of [
+      [-1.7, 0.1, 1],
+      [1.9, -0.2, 0.82],
+      [0.2, 0.35, 0.65],
+    ] as [number, number, number][]) {
+      const trunk = new Mesh(new CylinderGeometry(0.055, 0.075, 0.9 * scale, 8), trunkMaterial)
+      trunk.position.set(x, ISLAND_TOP + 0.45 * scale, z)
+      trunk.castShadow = true
+      group.add(trunk)
+
+      const crown = new Mesh(new SphereGeometry(0.52 * scale, 12, 10), foliage)
+      crown.scale.set(1, 0.7, 1)
+      crown.position.set(x, ISLAND_TOP + 1.05 * scale, z)
+      crown.castShadow = true
+      group.add(crown)
+    }
+
+    return group
+  }
+
+  /**
+   * Stainless ladder. It sits on a long wall, between the tangent points where
+   * the river's bank meets the straight shell — out at the ends the water no
+   * longer reaches the original wall.
+   */
   private buildLadder(): Group {
     const group = new Group()
     const metal = new MeshStandardMaterial({ color: '#cdd6da', roughness: 0.22, metalness: 0.9 })
@@ -193,12 +296,12 @@ export class Pool {
       const top = new Mesh(railShape, metal)
       top.rotation.z = Math.PI / 2
       top.rotation.y = Math.PI / 2
-      top.position.set(POOL_HALF_W - 0.28, WATER_LEVEL + POOL.copingHeight + 0.22, 2.4 + offset)
+      top.position.set(-0.28, WATER_LEVEL + POOL.copingHeight + 0.22, offset)
       top.castShadow = true
       group.add(top)
 
       const post = new Mesh(new CylinderGeometry(0.028, 0.028, 1.35, 10), metal)
-      post.position.set(POOL_HALF_W - 0.5, WATER_LEVEL - 0.45, 2.4 + offset)
+      post.position.set(-0.5, WATER_LEVEL - 0.45, offset)
       post.castShadow = true
       group.add(post)
     }
@@ -206,11 +309,14 @@ export class Pool {
     for (let i = 0; i < 3; i++) {
       const step = new Mesh(new CylinderGeometry(0.026, 0.026, 0.6, 8), metal)
       step.rotation.x = Math.PI / 2
-      step.position.set(POOL_HALF_W - 0.5, WATER_LEVEL - 0.2 - i * 0.35, 2.4)
+      step.position.set(-0.5, WATER_LEVEL - 0.2 - i * 0.35, 0)
       step.castShadow = true
       group.add(step)
     }
 
+    // Built facing -X against a wall at the local origin; turn it to face -Z.
+    group.position.set(1.8, 0, POOL_HALF_D)
+    group.rotation.y = -Math.PI / 2
     return group
   }
 
@@ -269,10 +375,21 @@ export class Pool {
     return group
   }
 
-  /** Nearest point inside the pool walls, used when spawning objects. */
+  /**
+   * Nearest point in the river channel, used when spawning things: outside the
+   * island, inside the bank.
+   */
   static clampInside(point: Vector3, margin: number): Vector3 {
-    point.x = Math.max(-POOL_HALF_W + margin, Math.min(POOL_HALF_W - margin, point.x))
-    point.z = Math.max(-POOL_HALF_D + margin, Math.min(POOL_HALF_D - margin, point.z))
+    clampToRing(
+      RIVER_BANK,
+      point.x,
+      point.z,
+      ISLAND.radius + margin,
+      RIVER.outerRadius - margin,
+      _ring,
+    )
+    point.x = _ring.x
+    point.z = _ring.z
     return point
   }
 
@@ -283,4 +400,28 @@ export class Pool {
     this.deckMaterial.dispose()
     this.copingMaterial.dispose()
   }
+}
+
+const _ring: Vec2 = { x: 0, z: 0 }
+
+/**
+ * The outline of a stadium as a closed polyline, in the shape's own XZ frame.
+ * Used for the island's extruded wall; the same shape drives its collision and
+ * the current that runs round it.
+ */
+function stadiumOutline(shape: Stadium, segmentsPerCap: number): Vector2[] {
+  const points: Vector2[] = []
+  for (let i = 0; i <= segmentsPerCap; i++) {
+    const angle = -Math.PI / 2 + (Math.PI * i) / segmentsPerCap
+    points.push(
+      new Vector2(shape.halfLength + Math.cos(angle) * shape.radius, Math.sin(angle) * shape.radius),
+    )
+  }
+  for (let i = 0; i <= segmentsPerCap; i++) {
+    const angle = Math.PI / 2 + (Math.PI * i) / segmentsPerCap
+    points.push(
+      new Vector2(-shape.halfLength + Math.cos(angle) * shape.radius, Math.sin(angle) * shape.radius),
+    )
+  }
+  return points
 }

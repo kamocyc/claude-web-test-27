@@ -13,6 +13,16 @@ import { WATER_LEVEL } from '../core/config'
 import type { PhysicsContext } from '../physics/PhysicsWorld'
 import { FloatingObject } from './FloatingObject'
 
+/**
+ * What the body is doing with itself.
+ *
+ * `swim` is the stroke that drives everything; `stand` is a person on their
+ * feet, used for the walk up the slide's steps; `ride` is prone and streamlined
+ * in the flume, where the slide's shape does the steering and the swimmer only
+ * has to keep from tumbling.
+ */
+export type SwimmerPose = 'swim' | 'stand' | 'ride'
+
 export interface SwimmerColors {
   skin: string
   suit: string
@@ -66,11 +76,14 @@ export class Swimmer extends FloatingObject {
   pitchInput = 0
   /** Extra push, held while sprinting. */
   sprint = 0
+  /** Swimming, on their feet, or going down the slide. */
+  pose: SwimmerPose = 'swim'
 
   readonly colors: SwimmerColors
 
   private phase = Math.random() * Math.PI * 2
   private readonly rig: {
+    root: Group
     shoulders: [Group, Group]
     elbows: [Group, Group]
     hands: [Object3D, Object3D]
@@ -130,6 +143,11 @@ export class Swimmer extends FloatingObject {
   }
 
   applyControl(dt: number, context: PhysicsContext): void {
+    if (this.pose !== 'swim') {
+      this.holdPose(dt, context)
+      return
+    }
+
     const effort = Math.min(1, this.throttle * (1 + this.sprint * 0.55))
 
     // Stroke rate rises with effort; a drifting swimmer still sculls gently.
@@ -155,6 +173,19 @@ export class Swimmer extends FloatingObject {
       this.body.force.y += this.pitchInput * 420 * wet
     }
 
+    // Keeping your head up. A swimmer is barely lighter than the water they
+    // displace, and the wave-radiation drag that stops a float bobbing for ever
+    // also means buoyancy alone takes the best part of a minute to bring
+    // someone back up from half a metre down. Anyone who has been pushed under
+    // — by a wave, by a bad landing off the slide — kicks for the surface, so
+    // this is a control input like the stroke, not a correction to the physics:
+    // it fades to nothing as the head reaches the air.
+    const head = this.body.worldSpheres[0]!
+    const headDepth = WATER_LEVEL + context.water.heightAt(head.x, head.z) - head.y
+    if (headDepth > 0.02) {
+      this.body.force.y += Math.min(headDepth, 0.5) * 1200
+    }
+
     // --- Attitude control -----------------------------------------------------
     // Swimmers hold themselves level and point where they are going; both are
     // torques so waves and collisions can still knock them about.
@@ -175,9 +206,53 @@ export class Swimmer extends FloatingObject {
     this.animate(dt, effort, context)
   }
 
+  /**
+   * Off the water: no stroke, no thrust, just enough attitude control to stay
+   * the right way up.
+   *
+   * A rider in the flume is an ordinary rigid body — the trough steers them and
+   * gravity accelerates them — but a body with no way to brace itself tumbles
+   * on the first bump and arrives head down. This is the bracing: the same
+   * levelling torque the swimmer uses in the water, applied while they are
+   * dry, and nothing else. It cannot drive them along, so the ride is still
+   * entirely the slide's doing.
+   */
+  private holdPose(dt: number, context: PhysicsContext): void {
+    if (this.pose === 'ride' && this.body.dynamic) {
+      _localUp.set(0, 1, 0).applyQuaternion(this.body.quaternion)
+      _axis.copy(_localUp).cross(_worldUp)
+      _torque.copy(_axis).multiplyScalar(30)
+      _torque.x -= this.body.angularVelocity.x * 9
+      _torque.y -= this.body.angularVelocity.y * 6
+      _torque.z -= this.body.angularVelocity.z * 9
+      this.body.addTorque(_torque)
+    }
+    this.animate(dt, 0, context)
+  }
+
   /** Drive the visual rig and let the limbs talk back to the water. */
   private animate(dt: number, effort: number, context: PhysicsContext): void {
-    const { shoulders, elbows, hips, knees, head } = this.rig
+    const { root, shoulders, elbows, hips, knees, head } = this.rig
+
+    if (this.pose !== 'swim') {
+      // Standing turns the whole rig upright: it is built lying along +Z, so a
+      // quarter turn about X puts the head above the hips.
+      root.rotation.x = this.pose === 'stand' ? -Math.PI / 2 : 0
+      const stand = this.pose === 'stand'
+      for (let side = 0; side < 2; side++) {
+        // Every limb hangs along -Z from its joint, so standing needs the
+        // joints at rest: the quarter turn above already points them at the
+        // ground. Riding puts the arms overhead, which is +Z, half a turn away.
+        shoulders[side]!.rotation.x = stand ? -0.12 : Math.PI
+        elbows[side]!.rotation.x = stand ? -0.18 : -0.05
+        hips[side]!.rotation.x = stand ? 0.05 : 0.05
+        knees[side]!.rotation.x = stand ? -0.05 : -0.08
+      }
+      head.rotation.set(0, 0, 0)
+      this.object.updateMatrixWorld(true)
+      return
+    }
+    root.rotation.x = 0
 
     for (let side = 0; side < 2; side++) {
       const armPhase = this.phase + (side === 0 ? 0 : Math.PI)
@@ -345,6 +420,6 @@ export class Swimmer extends FloatingObject {
       knee.add(foot)
     }
 
-    return { shoulders, elbows, hands, hips, knees, head }
+    return { root, shoulders, elbows, hands, hips, knees, head }
   }
 }

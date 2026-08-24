@@ -88,6 +88,34 @@ export function createDebugGui(app: App): GuiHandle {
       .name(`eddy ${i + 1}`)
       .onChange(() => app.waves.markFlowDirty())
   }
+  for (let i = 0; i < app.flow.channels.length; i++) {
+    current
+      .add(app.flow.channels[i]!, 'strength', 0, 2.5, 0.05)
+      .name('lazy river')
+      .onChange(() => app.waves.markFlowDirty())
+  }
+
+  // --- Slide and fountains ---------------------------------------------------
+  const rides = gui.addFolder('Slide & fountains')
+  rides
+    .add({ send: () => app.sendDownTheSlide() }, 'send')
+    .name('send someone down the slide')
+  const fountainState = {
+    running: true,
+    speed: app.fountains[0]?.speed ?? 7,
+  }
+  rides
+    .add(fountainState, 'running')
+    .name('fountains on')
+    .onChange((value: boolean) => {
+      for (const fountain of app.fountains) fountain.enabled = value
+    })
+  rides
+    .add(fountainState, 'speed', 2, 11, 0.25)
+    .name('jet speed')
+    .onChange((value: number) => {
+      for (const fountain of app.fountains) fountain.speed = value
+    })
 
   // --- Sky ------------------------------------------------------------------
   const sky = gui.addFolder('Sky')

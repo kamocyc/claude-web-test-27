@@ -7,6 +7,7 @@ import {
   Vector3,
 } from 'three'
 import { GRAVITY, POOL_HALF_D, POOL_HALF_W, WATER_LEVEL } from '../core/config'
+import type { SplashOptions } from '../physics/PhysicsWorld'
 import type { FlowField, Vec2 } from '../sim/FlowField'
 import type { WaveFieldCPU } from '../sim/WaveFieldCPU'
 import type { SplatQueue } from '../sim/WaveSplat'
@@ -108,6 +109,19 @@ export class SprayParticles {
   }
 
   /**
+   * Live droplets above a height. Anything well clear of the surface came out
+   * of a fountain or a hard entry rather than a stroke, which is what makes
+   * this worth asking.
+   */
+  countAbove(height: number): number {
+    let count = 0
+    for (let i = 0; i < this.capacity; i++) {
+      if (this.lives[i]! > 0 && this.positions[i * 3 + 1]! > height) count++
+    }
+    return count
+  }
+
+  /**
    * Recompute the metres-to-pixels conversion. Must be called on resize and
    * whenever the field of view changes.
    */
@@ -120,7 +134,15 @@ export class SprayParticles {
    * Throw `count` droplets from a point, biased upwards around `direction`.
    * `speed` sets how far they fly; `spread` how much they fan out.
    */
-  emit(origin: Vector3, direction: Vector3, count: number, speed: number, spread = 0.7): void {
+  emit(
+    origin: Vector3,
+    direction: Vector3,
+    count: number,
+    speed: number,
+    spread = 0.7,
+    options: SplashOptions = {},
+  ): void {
+    const jitter = options.speedJitter ?? 1
     for (let i = 0; i < count; i++) {
       const index = this.cursor
       this.cursor = (this.cursor + 1) % this.capacity
@@ -134,16 +156,19 @@ export class SprayParticles {
       const jitterX = (Math.random() - 0.5) * spread
       const jitterY = Math.random() * spread * 0.8
       const jitterZ = (Math.random() - 0.5) * spread
-      const magnitude = speed * (0.55 + Math.random() * 0.75)
+      // With jitter at 1 this is the old spread exactly; at 0 every droplet
+      // leaves at the speed asked for, which is what a nozzle does.
+      const varied = 0.55 + Math.random() * 0.75
+      const magnitude = speed * (1 + (varied - 1) * jitter)
       this.velocities[p] = (direction.x + jitterX) * magnitude
       this.velocities[p + 1] = (direction.y + jitterY) * magnitude
       this.velocities[p + 2] = (direction.z + jitterZ) * magnitude
 
-      this.lives[index] = 0.45 + Math.random() * 0.85
+      this.lives[index] = (options.life ?? 0.9) * (0.5 + Math.random() * 0.94)
       // Droplet diameter in metres: fat splash beads, not fine mist. At the
       // distance the pool is usually viewed from, anything under a couple of
       // centimetres covers about two pixels and reads as nothing at all.
-      this.sizes[index] = 0.015 + Math.random() * 0.028
+      this.sizes[index] = (options.size ?? 0.029) * (0.5 + Math.random() * 0.97)
     }
   }
 

@@ -1,9 +1,28 @@
 import { Vector3 } from 'three'
-import { GRAVITY, WATER_DENSITY } from '../core/config'
+import { AIR_DENSITY, GRAVITY, WATER_DENSITY } from '../core/config'
 import type { FlowField, Vec2 } from '../sim/FlowField'
 import type { WaveFieldCPU } from '../sim/WaveFieldCPU'
 import type { SplatQueue } from '../sim/WaveSplat'
 import type { RigidBody } from './RigidBody'
+
+/**
+ * Form drag on the part of a sphere that is out of the water.
+ *
+ * Nothing heavy notices it. A beach ball does: a fountain that throws a
+ * two-kilo swim ring throws a two-hundred-gram ball ten times as hard, and
+ * without anything to spend the energy on it leaves the scene entirely. Air is
+ * eight hundred times thinner than water, so this is the same term as the
+ * water's form drag with a different density.
+ */
+function applyAirDrag(body: RigidBody, centre: Vector3, radius: number, dryFraction: number): void {
+  if (dryFraction <= 0.01) return
+  body.pointVelocity(centre, _pointVel)
+  const speed = _pointVel.length()
+  if (speed < 0.5) return
+  const area = Math.PI * radius * radius * dryFraction
+  _force.copy(_pointVel).multiplyScalar(-0.5 * AIR_DENSITY * AIR_DRAG * area * speed)
+  body.addForceAtPoint(_force, centre)
+}
 
 /**
  * Volume of the submerged cap of a sphere whose centre sits `submersion`
@@ -30,6 +49,12 @@ export interface BuoyancyOptions {
    */
   addedMass?: number
 }
+
+/**
+ * Drag coefficient in air. Between a sphere's 0.47 and a person's 1, and the
+ * choice matters much less than having the term at all.
+ */
+const AIR_DRAG = 0.6
 
 const _up = new Vector3(0, 1, 0)
 const _force = new Vector3()
@@ -77,7 +102,10 @@ export function applyBuoyancy(
     const surfaceY = water.heightAt(centre.x, centre.z)
     const submersion = surfaceY - centre.y
 
-    if (submersion <= -sphere.radius) continue
+    if (submersion <= -sphere.radius) {
+      applyAirDrag(body, centre, sphere.radius, 1)
+      continue
+    }
 
     const displaced = submergedSphereVolume(sphere.radius, submersion) * perSphereVolumeScale
     displacedTotal += displaced
@@ -114,6 +142,8 @@ export function applyBuoyancy(
       if (_force.length() > maxImpulse) _force.setLength(maxImpulse)
       body.addForceAtPoint(_force, centre)
     }
+
+    applyAirDrag(body, centre, sphere.radius, 1 - submergedFraction)
 
     // Waves push floating things downhill. Slope times displaced weight is the
     // horizontal component of the pressure gradient, to first order.
